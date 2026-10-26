@@ -94,21 +94,32 @@ function apRoutes() {
   return list;
 }
 function apRouteIcon(action, p) {
-  if (action === "direct") return icon("arrow", 14);
+  if (action === "direct") return icon("globe", 14);
   if (action === "block") return icon("ban", 14);
-  return icon(typeIconName(p && p.type), 14);
+  const t = p && p.type;
+  if (t === "vless") return icon("vless", 14);
+  return icon(t === "http" ? "http" : "shield", 14);
+}
+function apRouteKind(action, p) {
+  if (action === "direct") return "direct";
+  if (action === "block") return "block";
+  return (p && p.type) || "socks5";
 }
 function apRouteText(action, proxy) {
-  if (action === "direct") return { kind: "Напрямую", name: "без прокси" };
-  if (action === "block") return { kind: "Блокировать", name: "без сети" };
+  if (action === "direct") return { kind: "Напрямую", name: "" };
+  if (action === "block") return { kind: "Блокировать", name: "" };
   const p = (cfg().proxies || []).find((x) => x.name === proxy);
   return { kind: p ? proxyTypeLabel(p.type) : "Прокси", name: proxy || "не выбран" };
 }
+// apRouteBadge is the compact route button: type icon, type, endpoint,
+// chevron. The proxy's name is in the tooltip and in the list.
 function apRouteBadge(target, action, proxy, bad) {
-  const t = apRouteText(action, proxy);
   const p = (cfg().proxies || []).find((x) => x.name === proxy);
+  const t = apRouteText(action, proxy);
+  const ep = action === "proxy" ? (p ? proxyAddrText(p) : "не выбран") : "";
   const open = apOpen === "route:" + target;
-  return `<div class="ap-pop-wrap"><button class="ap-route${bad ? " bad" : ""}${action !== "proxy" ? " " + action : ""}" type="button" data-act="ap-route" data-target="${esc(target)}" title="Сменить маршрут">${apRouteIcon(action, p)}<b>${esc(t.kind)}</b><span>${esc(t.name)}</span>${icon("chev", 12)}</button>${open ? apRoutePopover(target, action, proxy) : ""}</div>`;
+  const tip = action === "proxy" ? `${proxy} · ${ep}` : t.kind;
+  return `<div class="ap-pop-wrap"><button class="ap-route k-${apRouteKind(action, p)}${bad ? " bad" : ""}" type="button" data-act="ap-route" data-target="${esc(target)}" title="${esc(tip)}">${apRouteIcon(action, p)}<b>${esc(t.kind)}</b>${ep ? `<span class="sep">·</span><span class="ep">${esc(ep)}</span>` : ""}${icon("chev", 12)}</button>${open ? apRoutePopover(target, action, proxy) : ""}</div>`;
 }
 function apRoutePopover(target, action, proxy) {
   const items = apRoutes().map((r) => {
@@ -116,14 +127,15 @@ function apRoutePopover(target, action, proxy) {
     let side = "";
     if (r.p) {
       const v = probeView(r.p);
-      side = `<span class="st ${v.kind}">${esc(v.kind === "err" ? "нет ответа" : v.label)}</span>`;
+      side = v.kind === "err" ? `<span class="st err">Offline</span>` : v.kind === "neu" ? "" : `<span class="st ok">${esc(v.label)}</span>`;
     }
     const t = apRouteText(r.action, r.proxy);
-    const sub = r.p ? proxyAddrText(r.p) : r.action === "direct" ? "трафик мимо прокси" : "трафик отбрасывается";
-    return `<button type="button" class="${on ? "on" : ""}" data-act="ap-route-set" data-target="${esc(target)}" data-action="${r.action}" data-proxy="${esc(r.proxy)}">${apRouteIcon(r.action, r.p)}<span class="txt"><span class="nm">${esc(r.p ? r.proxy : t.kind)}</span><span class="sub">${esc(sub)}</span></span>${side}${on ? icon("check", 14) : ""}</button>`;
+    const name = r.p ? r.proxy : t.kind;
+    const sub = r.p ? `${proxyTypeLabel(r.p.type)} · ${proxyAddrText(r.p)}` : r.action === "direct" ? "без прокси" : "трафик отбрасывается";
+    return `<button type="button" class="${on ? "on" : ""}" data-act="ap-route-set" data-target="${esc(target)}" data-action="${r.action}" data-proxy="${esc(r.proxy)}"><span class="ri k-${apRouteKind(r.action, r.p)}">${apRouteIcon(r.action, r.p)}</span><span class="txt"><span class="nm">${esc(name)}</span><span class="sub">${esc(sub)}</span></span><span class="end">${side}${on ? icon("check", 14) : ""}</span></button>`;
   }).join("");
-  const title = target.startsWith("g:") ? "Маршрут для всей группы" : "Маршрут приложения";
-  return `<div class="ap-pop route"><div class="cap">${title}</div>${items}${(cfg().proxies || []).length ? "" : `<button type="button" data-act="goto" data-page="proxies">${icon("plus", 14)}<span class="txt"><span class="nm">Добавить прокси</span></span></button>`}</div>`;
+  const title = target.startsWith("g:") ? "Назначить прокси группе" : "Назначить прокси";
+  return `<div class="ap-pop route"><div class="cap">${title}</div>${items}${(cfg().proxies || []).length ? "" : `<button type="button" data-act="goto" data-page="proxies"><span class="ri">${icon("plus", 14)}</span><span class="txt"><span class="nm">Добавить прокси</span></span></button>`}</div>`;
 }
 
 // ---------- telemetry ----------
@@ -176,7 +188,7 @@ function flowWord(n) {
 // ---------- page ----------
 
 function appsHTML() {
-  return `<div class="head"><div><h1>Приложения</h1><p class="sub">Маршрутизация трафика выбранных программ. Остальные работают напрямую.</p></div>
+  return `<div class="head"><div><h1>Приложения</h1><p class="sub">Маршрутизация трафика выбранных программ. Остальные работают напрямую.</p><p class="ap-help">Проверяются сверху вниз — срабатывает первое совпадение.</p></div>
   <div class="head-actions"><label class="field search ap-search">${icon("search")}<input id="ap-q" placeholder="Поиск по приложениям" value="${esc(apQuery)}" autocomplete="off"></label>
   <button class="btn secondary" data-act="ap-windows" type="button">${icon("window")}Из окон</button>
   <button class="btn pri" data-act="ap-add" type="button">${icon("plus")}Добавить</button>${headMore()}</div></div>
@@ -210,9 +222,9 @@ function fillApps() {
   const groupsOn = active.filter((u) => u.group).length;
   const sel = apSelected.size ? apSelectionBar(activeCount) : "";
   const body = `${apKillBanner()}${sel}
-    <div class="ap-sec"><div class="ap-sec-h"><span class="t">Активные правила</span><span class="c">${activeCount}</span>${groupsOn ? `<span class="g">${groupsOn} ${groupWord(groupsOn)}</span>` : ""}<span class="note">Проверяются сверху вниз — срабатывает первое совпадение</span></div>
+    <div class="ap-sec"><div class="ap-sec-h"><span class="t">Активные правила</span><span class="c">${activeCount}</span>${groupsOn ? `<span class="g">(${groupsOn} ${groupWord(groupsOn)})</span>` : ""}</div>
     ${active.length ? `<div class="ap-list">${active.map((u) => apUnitHTML(u)).join("")}</div>` : `<div class="ap-none">${apQuery ? "Ничего не найдено." : "Нет активных правил. Включите правило ниже или добавьте приложение."}</div>`}</div>
-    <div class="ap-sec off"><div class="ap-sec-h"><span class="t">Отключённые</span><span class="c">${Math.max(0, inactiveCount)}</span><span class="note">Их трафик идёт напрямую, мимо прокси</span></div>
+    <div class="ap-sec off"><div class="ap-sec-h"><span class="t">Отключённые и неактивные</span><span class="c">${Math.max(0, inactiveCount)}</span><span class="note">Трафик направляется напрямую в обход прокси</span></div>
     ${inactive.length ? `<div class="ap-list">${inactive.map((u) => apUnitHTML(u)).join("")}</div>` : `<div class="ap-none">Все правила включены.</div>`}</div>
     <p class="hint">${icon("info", 14)} Перетащите карточку, чтобы изменить порядок. Для системных служб Windows (svchost.exe, DNS) используйте «Настройки → Системный резолвер».</p>`;
   if (setHTML(host, body)) apBindDrag(host);
@@ -249,32 +261,38 @@ function apUnitHTML(u) {
   return u.group ? apGroupHTML(u) : apRuleHTML(u.index, false);
 }
 
+function apPath(process) {
+  return String(process || "").trim().replace(/^"+|"+$/g, "");
+}
+function apSwitch(act, data, on, title) {
+  return `<button class="ap-switch${on ? " on" : ""}" type="button" role="switch" aria-checked="${on}" data-act="${act}" ${data} title="${esc(title)}"><i></i></button>`;
+}
+
 function apRuleHTML(i, inGroup) {
   const r = cfg().rules[i];
   const s = apStatus(r);
   const eff = apEffective(r);
   const selected = apSelected.has(i);
-  const childBadge = r.children !== false ? `<span class="chip" title="Дочерние процессы идут по этому же правилу">${icon("branch", 11)}+дочерние</span>` : "";
-  const tcp = r.tcpOnly ? `<span class="chip" title="UDP приложения отбрасывается">только TCP</span>` : "";
-  const ksChip = eff.action === "proxy" && apRuleKS(r) ? `<span class="chip ks" title="Kill switch: без прокси приложение не выходит в сеть">${icon("shield", 11)}kill switch</span>` : "";
-  const check = inGroup ? `<span class="ap-slot"></span>` : `<button class="ap-check${selected ? " on" : ""}${apSelected.size ? " show" : ""}" type="button" data-act="ap-select" data-i="${i}" title="${selected ? "Снять выбор" : "Выбрать для группировки"}">${selected ? icon("check", 12) : ""}</button>`;
-  const route = inGroup ? `<span class="ap-route-ph"></span>` : apRouteBadge("r" + i, r.action, r.proxy || "", s.bad);
+  const childBadge = r.children !== false ? `<span class="chip" title="Дочерние процессы идут по этому же правилу">${icon("branch", 10)}+дочерние</span>` : "";
+  // Grouped rules take the group's selection, route and switch.
+  const check = inGroup ? "" : `<button class="ap-check${selected ? " on" : ""}" type="button" data-act="ap-select" data-i="${i}" title="${selected ? "Снять выбор" : "Выбрать правило для группировки"}" aria-pressed="${selected}">${selected ? icon("check", 11) : ""}</button>`;
+  const route = inGroup ? "" : apRouteBadge("r" + i, r.action, r.proxy || "", s.bad);
   apTele["r" + i] = apTelemetry(s);
   return `<div class="ap-card${eff.enabled ? "" : " dim"}${inGroup ? " member" : ""}${selected ? " picked" : ""}" draggable="${inGroup ? "false" : "true"}" data-unit="r:${i}">
-    <div class="ap-left">${check}<i class="ap-dot ${s.dot}" title="${esc(s.error || (s.flows ? "Трафик идёт через прокси" : s.line))}"></i>${appIconHTML(r.process)}
+    <div class="ap-left"><span class="ap-slot">${check}</span><span class="ap-dotslot"><i class="ap-dot ${s.dot}" title="${esc(s.error || (s.flows ? "Трафик идёт через прокси" : s.line))}"></i></span><span class="ap-ic">${appIconHTML(apPath(r.process))}</span>
       <div class="ap-name"><div class="nm"><span>${esc(apLabel(r.process))}</span>${s.badge ? `<em class="bad">${esc(s.badge)}</em>` : ""}</div>
-      <div class="sub"><span class="path">${esc(r.process)}</span>${childBadge}${tcp}${ksChip}</div></div></div>
+      <div class="sub"><span class="path">${esc(apPath(r.process))}</span>${childBadge}</div></div></div>
     <div class="ap-tele" data-tele="r${i}"></div>
-    ${route}
-    <div class="ap-right"><button class="toggle${apOn(r.enabled) ? " on" : ""}" type="button" data-act="ap-toggle" data-i="${i}" aria-pressed="${apOn(r.enabled)}" title="${apOn(r.enabled) ? "Выключить правило" : "Включить правило"}"><i></i></button>
-    <div class="ap-pop-wrap"><button class="iconbtn" type="button" data-act="ap-menu" data-target="r${i}" aria-label="Параметры правила">${icon("more")}</button>${apOpen === "menu:r" + i ? apRuleMenu(i, inGroup) : ""}</div></div>
+    <div class="ap-routecell">${route}</div>
+    <div class="ap-right">${apSwitch("ap-toggle", `data-i="${i}"`, apOn(r.enabled), apOn(r.enabled) ? "Выключить правило" : "Включить правило")}
+    <div class="ap-pop-wrap"><button class="ap-more" type="button" data-act="ap-menu" data-target="r${i}" aria-label="Параметры правила" title="Дополнительные параметры правила">${icon("more")}</button>${apOpen === "menu:r" + i ? apRuleMenu(i, inGroup) : ""}</div></div>
   </div>`;
 }
 
 function apRuleMenu(i, inGroup) {
   const r = cfg().rules[i];
   const ksDefault = r.killSwitch === undefined || r.killSwitch === null;
-  const box = (on) => icon(on ? "checkbox" : "square", 15);
+  const box = (on) => `<span class="box${on ? " on" : ""}">${icon(on ? "checkbox" : "square", 16)}</span>`;
   const g = inGroup ? apGroup(r.group) : null;
   return `<div class="ap-pop menu"><div class="cap">Параметры правила</div>
     ${g ? `<button type="button" data-act="ap-ungroup-one" data-i="${i}">${icon("folder", 14)}<span class="txt"><span class="nm">Исключить из группы «${esc(g.name)}»</span></span></button><div class="sep"></div>` : ""}
@@ -310,19 +328,19 @@ function apGroupHTML(u) {
   else if (!state.running) tele = `<div class="l1">Перехват выключен</div><div class="l2">${members.length} ${appWord(members.length)}</div>`;
   else if (flows) tele = `<div class="l1"><span class="n">${flows} ${flowWord(flows)}</span><span class="dim">·</span><span class="dn">↓ ${esc(apRate(down))}</span><span class="up">↑ ${esc(apRate(up))}</span></div><div class="l2">${bytes(total)} за сессию · ${members.length} ${appWord(members.length)}</div>`;
   else tele = `<div class="l1">Нет соединений</div><div class="l2">${members.length} ${appWord(members.length)} суммарно</div>`;
-  const icons = members.slice(0, 4).map((r) => appIconHTML(r.process, "width:18px;height:18px;border-radius:5px;font-size:9px")).join("");
+  const icons = members.slice(0, 4).map((r) => `<span class="mini" title="${esc(apLabel(r.process))}">${appIconHTML(apPath(r.process), "width:16px;height:16px;border-radius:50%;font-size:8px")}</span>`).join("");
   const target = "g:" + g.name;
   apTele[target] = tele;
   const open = !g.collapsed;
   const dot = !on ? "off" : bad ? "err" : g.action === "proxy" ? "ok" : g.action === "direct" ? "info" : "warn";
   return `<div class="ap-group${on ? "" : " dim"}" draggable="true" data-unit="g:${esc(g.name)}">
     <div class="ap-card group">
-      <div class="ap-left"><button class="ap-chev${open ? " open" : ""}" type="button" data-act="ap-collapse" data-group="${esc(g.name)}" title="${open ? "Свернуть группу" : "Развернуть группу"}">${icon("chevr", 14)}</button><i class="ap-dot ${dot}"></i><span class="ap-folder">${icon("folder", 16)}</span>
-        <div class="ap-name"><div class="nm"><span>${esc(g.name)}</span></div><div class="sub"><span class="stack">${icons}</span><span class="path">${esc(members.map((r) => apLabel(r.process)).join(", "))}</span></div></div></div>
+      <div class="ap-left"><span class="ap-slot"><button class="ap-chev${open ? " open" : ""}" type="button" data-act="ap-collapse" data-group="${esc(g.name)}" title="${open ? "Свернуть группу" : "Развернуть группу"}">${icon("chevr", 16)}</button></span><span class="ap-dotslot"><i class="ap-dot ${dot}"></i></span><span class="ap-folder">${icon("folder", 16)}</span>
+        <div class="ap-name"><div class="nm"><span>${esc(g.name)}</span></div><div class="sub g"><span class="stack">${icons}</span><span class="names">${esc(members.map((r) => apLabel(r.process)).join(", "))}</span></div></div></div>
       <div class="ap-tele" data-tele="${esc(target)}"></div>
-      ${apRouteBadge(target, g.action, g.proxy || "", bad)}
-      <div class="ap-right"><button class="toggle${on ? " on" : ""}" type="button" data-act="ap-gtoggle" data-group="${esc(g.name)}" aria-pressed="${on}" title="${on ? "Отключить всю группу" : "Включить всю группу"}"><i></i></button>
-      <div class="ap-pop-wrap"><button class="iconbtn" type="button" data-act="ap-menu" data-target="${esc(target)}" aria-label="Параметры группы">${icon("more")}</button>${apOpen === "menu:" + target ? apGroupMenu(g) : ""}</div></div>
+      <div class="ap-routecell">${apRouteBadge(target, g.action, g.proxy || "", bad)}</div>
+      <div class="ap-right">${apSwitch("ap-gtoggle", `data-group="${esc(g.name)}"`, on, on ? "Отключить всю группу правил" : "Включить всю группу правил")}
+      <div class="ap-pop-wrap"><button class="ap-more" type="button" data-act="ap-menu" data-target="${esc(target)}" aria-label="Параметры группы" title="Параметры группы">${icon("more")}</button>${apOpen === "menu:" + target ? apGroupMenu(g) : ""}</div></div>
     </div>
     ${open ? `<div class="ap-members">${u.members.map((j) => apRuleHTML(j, true)).join("")}</div>` : ""}
   </div>`;

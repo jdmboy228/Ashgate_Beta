@@ -50,6 +50,7 @@ const ICONS = {
   http: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   vless: '<path d="M13 3 5 14h6l-1 7 8-11h-6z"/>',
   arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.7 5.7 3.7 9S14.5 18.3 12 21c-2.5-2.7-3.7-5.7-3.7-9S9.5 5.7 12 3z"/>',
   ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
   chev: '<path d="m6 9 6 6 6-6"/>',
   chevr: '<path d="m9 6 6 6-6 6"/>',
@@ -250,9 +251,10 @@ function paintChrome() {
   side.className = "side-card" + (running ? " run" : "");
   // The Start/Stop button is rebuilt only when the state flips; the live
   // traffic line is updated in place so clicks on the button are not lost.
-  setHTML(side, `<button class="side-meta" id="side-status" type="button" aria-label="${esc(sideName)}"><i class="dot"></i><span class="name">${sideName}</span><span class="sub"></span></button>
+  // As in the design: status beacon and label, then one large button.
+  // The details stay in the tooltip; the Home page shows them in full.
+  setHTML(side, `<button class="side-meta" id="side-status" type="button" aria-label="${esc(sideName)}"><span class="beacon"><i class="dot"></i></span><span class="name">${sideName}</span></button>
     <button class="side-power${running ? " run" : ""}" id="side-power" type="button" aria-label="${powerLabel}">${icon("power", 16)}<span>${powerLabel}</span></button>`);
-  setText(side.querySelector(".sub"), sideSub);
   const meta = side.querySelector(".side-meta");
   if (meta) meta.title = sideName + " · " + sideSub;
   renderDirty();
