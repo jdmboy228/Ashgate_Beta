@@ -49,6 +49,10 @@ func Compile(rules []config.Rule) *Set {
 			c.match = NormalizePath(raw)
 		} else {
 			c.match = NormalizeName(raw)
+			// "chrome" means chrome.exe; every process image has an extension.
+			if c.match != "" && !strings.Contains(c.match, ".") {
+				c.match += ".exe"
+			}
 		}
 		out.rules = append(out.rules, c)
 	}

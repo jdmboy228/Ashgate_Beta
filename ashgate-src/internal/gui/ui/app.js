@@ -1,4 +1,23 @@
 const DEMO = new URLSearchParams(location.search).get("demo") === "1";
+// The window host injects this before the page loads; every API call must carry it.
+const TOKEN = window.__ashgateToken || "";
+function apiFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({ "X-Ashgate-Token": TOKEN }, opts.headers || {});
+  return fetch(path, opts);
+}
+// setHTML replaces el's markup only when it changed. Rebuilding unchanged
+// markup on every poll swallowed clicks that landed mid-rebuild, cleared
+// text selections and broke drag and drop.
+function setHTML(el, html) {
+  if (!el || el._html === html) return false;
+  el.innerHTML = html;
+  el._html = html;
+  return true;
+}
+function setText(el, text) {
+  if (el && el.textContent !== text) el.textContent = text;
+}
 const ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
   server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
@@ -58,7 +77,7 @@ let paused = false;
 let frozen = null;
 let logFilter = "";
 let logProto = "all";
-let sel = { proxy: 0, rule: -1, log: -1 };
+let sel = { proxy: 0, rule: -1, log: "" };
 let dragging = false;
 let built = "";
 let homeKey = "";
@@ -193,19 +212,24 @@ function paintChrome() {
     counts[1] = String((cfg().proxies || []).length);
     counts[2] = String((cfg().rules || []).length);
   }
-  nav.innerHTML = NAV.map((n, i) => {
+  setHTML(nav, NAV.map((n, i) => {
     const active = page === ["home", "proxies", "rules", "log", "settings"][i];
     const id = ["home", "proxies", "rules", "log", "settings"][i];
     return `<button class="nav-item${active ? " active" : ""}" data-nav="${id}" type="button" title="${esc(n[1])}" aria-label="${esc(n[1])}">${icon(n[0])}<span>${n[1]}</span>${counts[i] ? `<span class="count">${counts[i]}</span>` : ""}</button>`;
-  }).join("");
+  }).join(""));
   const side = document.getElementById("side-card");
   if (!side) return;
   const sideName = running ? "Работает" : "Остановлен";
   const traffic = state ? bytes((state.bytesUp || 0) + (state.bytesDown || 0)) : "0 Б";
   const sideSub = running ? (state.active || 0) + " потоков · " + traffic : "перехват выключен";
   side.className = "side-card" + (running ? " run" : "");
-  side.innerHTML = `<button class="side-meta" id="side-status" type="button" title="${esc(sideName + " · " + sideSub)}" aria-label="${esc(sideName)}"><i class="dot"></i><span class="name">${sideName}</span><span class="sub">${esc(sideSub)}</span></button>
-    <button class="side-power${running ? " run" : ""}" id="side-power" type="button" aria-label="${running ? "Стоп" : "Старт"}">${icon("power", 16)}<span>${running ? "Стоп" : "Старт"}</span></button>`;
+  // The Start/Stop button is rebuilt only when the state flips; the live
+  // traffic line is updated in place so clicks on the button are not lost.
+  setHTML(side, `<button class="side-meta" id="side-status" type="button" aria-label="${esc(sideName)}"><i class="dot"></i><span class="name">${sideName}</span><span class="sub"></span></button>
+    <button class="side-power${running ? " run" : ""}" id="side-power" type="button" aria-label="${running ? "Стоп" : "Старт"}">${icon("power", 16)}<span>${running ? "Стоп" : "Старт"}</span></button>`);
+  setText(side.querySelector(".sub"), sideSub);
+  const meta = side.querySelector(".side-meta");
+  if (meta) meta.title = sideName + " · " + sideSub;
   renderDirty();
 }
 
@@ -310,8 +334,14 @@ function fillHome() {
     const c = state.checks && state.checks[p.name];
     return c ? (c.ok ? c.label : c.detail) : "";
   }).join(",");
-  const key = [state.running, via.length, proxies.length, state.bytesUp, state.bytesDown, errs.length, checkKey].join("|");
-  if (homeKey === key && host.childElementCount) return;
+  const trafficV = bytes((state.bytesUp || 0) + (state.bytesDown || 0));
+  const trafficS = `↑ ${bytes(state.bytesUp)} · ↓ ${bytes(state.bytesDown)}`;
+  const key = [state.running, via.length, proxies.length, errs.length, checkKey, errs.slice(0, 4).map(eventKey).join(",")].join("|");
+  if (homeKey === key && host.childElementCount) {
+    setText(document.getElementById("traffic-v"), trafficV);
+    setText(document.getElementById("traffic-s"), trafficS);
+    return;
+  }
   homeKey = key;
   if (!proxies.length && !rules.length) {
     host.innerHTML = `<div class="onboard"><h2>Сначала добавьте прокси</h2><p>Вставьте ссылку vless:// или укажите SOCKS5 и HTTP. Затем выберите приложения. Запуск перехвата — кнопка в панели слева.</p><button class="btn pri" type="button" data-act="proxy-add">${icon("plus")}Добавить прокси</button></div>`;
@@ -322,7 +352,7 @@ function fillHome() {
   const stats = [
     ["Через прокси", String(via.length), via.length ? "включённых приложений" : "приложений нет"],
     ["Активные прокси", String(active.length), `из ${proxies.length}`],
-    ["Трафик", bytes((state.bytesUp || 0) + (state.bytesDown || 0)), `↑ ${bytes(state.bytesUp)} · ↓ ${bytes(state.bytesDown)}`],
+    ["Трафик", trafficV, trafficS, "traffic"],
     ["Ошибки", String(errs.length), errs.length ? "в журнале на экране" : "свежих нет"],
   ];
   const lines = (active.length ? active : proxies.slice(0, 4)).map((p) => {
@@ -330,7 +360,7 @@ function fillHome() {
     return `<div class="proxy-line">${typeTag(p.type)}<span class="main">${esc(p.name)}</span><span class="sub">${esc(proxyAddrText(p))}</span>${badge(view.label, view.kind, true, view.detail)}</div>`;
   }).join("");
   const recent = errs.slice(0, 4);
-  host.innerHTML = `<div class="stats">${stats.map((s) => `<div class="stat"><div class="k">${s[0]}</div><div class="v">${s[1]}</div><div class="s">${s[2]}</div></div>`).join("")}</div>
+  host.innerHTML = `<div class="stats">${stats.map((s) => `<div class="stat"><div class="k">${s[0]}</div><div class="v"${s[3] ? ` id="${s[3]}-v"` : ""}>${esc(s[1])}</div><div class="s"${s[3] ? ` id="${s[3]}-s"` : ""}>${esc(s[2])}</div></div>`).join("")}</div>
     <div class="section-row"><h3>${active.length ? "Активные прокси" : "Прокси"}</h3><button class="link" data-act="goto" data-page="proxies" type="button">Все прокси</button></div>
     <div class="proxy-list">${lines || `<div class="empty">Прокси ещё нет.</div>`}</div>
     <div class="section-row"><h3>Последние ошибки</h3><button class="link" data-act="goto" data-page="log" type="button">Журнал</button></div>
@@ -347,7 +377,7 @@ function fillProxies() {
   if (!host) return;
   const list = cfg().proxies || [];
   if (!list.length) {
-    host.innerHTML = `<div class="table"><div class="empty-card"><h3>Прокси ещё нет</h3><p>Добавьте SOCKS5, HTTP или вставьте ссылку vless://.</p><button class="btn pri" type="button" data-act="proxy-add">${icon("plus")}Добавить прокси</button></div></div>`;
+    setHTML(host, `<div class="table"><div class="empty-card"><h3>Прокси ещё нет</h3><p>Добавьте SOCKS5, HTTP или вставьте ссылку vless://.</p><button class="btn pri" type="button" data-act="proxy-add">${icon("plus")}Добавить прокси</button></div></div>`);
     return;
   }
   const head = ["#", "Имя", "Тип", "Адрес", "Проверка", ""];
@@ -367,7 +397,7 @@ function fillProxies() {
       <td><div class="row-actions">${acts}<button class="iconbtn" data-act="menu-proxy" data-i="${i}" type="button" aria-label="Ещё">${icon("more")}</button></div></td>
     </tr>`;
   });
-  host.innerHTML = `<table class="table tall"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`;
+  setHTML(host, `<table class="table tall"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`);
 }
 
 function ruleSub(rule) {
@@ -385,13 +415,14 @@ function baseName(process) {
 function appLabel(process) {
   return baseName(process).replace(/\.exe$/i, "");
 }
-function appIconHTML(process) {
+function appIconHTML(process, style) {
   const letter = esc((appLabel(process) || "?").slice(0, 1).toUpperCase());
   const path = String(process || "");
   const isPath = /[\\/]/.test(path) || /^[A-Za-z]:/.test(path);
-  if (DEMO || !isPath) return `<span class="appicon">${letter}</span>`;
-  const src = "/api/icon?path=" + encodeURIComponent(path);
-  return `<span class="appicon"><img alt="" src="${esc(src)}" onload="this.parentNode.classList.add('hasimg')" onerror="this.remove()">${letter}</span>`;
+  const st = style ? ` style="${style}"` : "";
+  if (DEMO || !isPath) return `<span class="appicon"${st}>${letter}</span>`;
+  const src = "/api/icon?path=" + encodeURIComponent(path) + "&t=" + encodeURIComponent(TOKEN);
+  return `<span class="appicon"${st}><img alt="" src="${esc(src)}" onload="this.parentNode.classList.add('hasimg')" onerror="this.remove()">${letter}</span>`;
 }
 
 function fillRules() {
@@ -399,7 +430,7 @@ function fillRules() {
   if (!host || dragging) return;
   const list = cfg().rules || [];
   if (!list.length) {
-    host.innerHTML = `<div class="table"><div class="empty-card"><h3>Приложений ещё нет</h3><p>Укажите exe или полный путь. Первое включённое совпадение сверху побеждает.</p><button class="btn pri" type="button" data-act="rule-add">${icon("plus")}Добавить приложение</button></div></div>`;
+    setHTML(host, `<div class="table"><div class="empty-card"><h3>Приложений ещё нет</h3><p>Укажите exe или полный путь. Первое включённое совпадение сверху побеждает.</p><button class="btn pri" type="button" data-act="rule-add">${icon("plus")}Добавить приложение</button></div></div>`);
     return;
   }
   const head = ["#", "", "Приложение", "Действие", "Через", ""];
@@ -414,7 +445,8 @@ function fillRules() {
       <td><button class="iconbtn" data-act="menu-rule" data-i="${i}" type="button" aria-label="Ещё">${icon("more")}</button></td>
     </tr>`;
   });
-  host.innerHTML = `<table class="table tall" id="rules"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`;
+  // Listeners belong to the rows; they are attached only when rows are new.
+  if (!setHTML(host, `<table class="table tall" id="rules"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`)) return;
   host.querySelectorAll("[data-grip]").forEach((g) => {
     const tr = g.closest("tr");
     g.addEventListener("mousedown", () => { tr.draggable = true; });
@@ -437,6 +469,7 @@ function fillRules() {
     tr.addEventListener("dragend", () => {
       dragging = false;
       tr.draggable = false;
+      host.querySelectorAll(".drop-line").forEach((n) => n.classList.remove("drop-line"));
       fillRules();
     });
   });
@@ -470,25 +503,26 @@ function fillLog() {
     live.className = "live" + (paused ? " pause" : "");
     live.querySelector("span").textContent = paused ? "пауза" : "в реальном времени · 250 мс";
   }
-  if (pause) pause.innerHTML = paused ? `${icon("play")}Продолжить` : `${icon("pause")}Пауза`;
+  if (pause) setHTML(pause, paused ? `${icon("play")}Продолжить` : `${icon("pause")}Пауза`);
   const banner = document.getElementById("pause-banner");
   if (banner) {
     if (paused) {
       const n = missedCount();
       banner.hidden = false;
-      banner.innerHTML = `<span>Пауза · ${n} новых соединений не показаны</span><button type="button" data-act="pause">Показать</button>`;
+      setHTML(banner, `<span>Пауза · ${n} новых соединений не показаны</span><button type="button" data-act="pause">Показать</button>`);
     } else banner.hidden = true;
   }
   const rows = logEvents();
   if (!rows.length) {
-    host.innerHTML = `<div class="table"><div class="empty">${(state.events || []).length ? "Ничего не найдено." : "Пока нет перехваченных соединений. Они появятся после «Старт»."}</div></div>`;
+    setHTML(host, `<div class="table"><div class="empty">${(state.events || []).length ? "Ничего не найдено." : "Пока нет перехваченных соединений. Они появятся после «Старт»."}</div></div>`);
     return;
   }
   const head = ["Время", "Процесс", "Протокол", "Назначение", "Через", "Статус", "Трафик"];
-  const body = rows.map((e, i) => {
+  const body = rows.map((e) => {
     const key = eventKey(e);
     const open = e.status === "error" && openErr === key;
-    const main = `<tr class="${sel.log === i ? "sel" : ""}" data-act="sel-log" data-i="${i}">
+    // Rows are selected by event, not by position: new events push rows down.
+    const main = `<tr class="${sel.log === key ? "sel" : ""}" data-act="sel-log" data-key="${esc(key)}">
     <td class="mono">${esc(e.time)}</td>
     <td><div class="stack"><span class="main">${esc(appLabel(e.process))}</span><span class="sub mono">PID ${e.pid || 0}</span></div></td>
     <td><span class="tag${e.proto === "UDP" ? " udp" : ""}">${esc(e.proto || "")}</span></td>
@@ -501,7 +535,7 @@ function fillLog() {
     const err = e.error || "ошибка";
     return main + `<tr class="errline"><td colspan="7"><div class="errpanel"><span class="msg">${esc(err)}</span><button class="btn sm" type="button" data-act="copy-text" data-text="${esc(err)}">Копировать</button><button class="btn sm" type="button" data-act="goto-rule" data-proc="${esc(e.process || "")}">К правилу</button></div></td></tr>`;
   }).join("");
-  host.innerHTML = `<table class="table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+  setHTML(host, `<table class="table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`);
 }
 function table(head, rows, empty) {
   if (!rows.length) return `<div class="table"><div class="empty">${esc(empty || "")}</div></div>`;
@@ -743,7 +777,7 @@ function ruleDialog() {
         const choice = chosenProcess(a.name, a.path);
         const cur = (r.process || "").toLowerCase();
         const on = cur === choice.toLowerCase() || cur === (a.name || "").toLowerCase() || (a.path && cur === a.path.toLowerCase());
-        return `<button class="pick${on ? " on" : ""}" type="button" data-act="pick" data-name="${esc(a.name)}" data-path="${esc(a.path || "")}"><span class="appicon" style="width:22px;height:22px;border-radius:5px;font-size:11px">${esc((a.name || "?").slice(0, 1).toUpperCase())}</span><span class="name">${esc(a.name)}</span><span class="pid mono">PID ${a.pid || ""}</span><span class="path">${esc(a.path || "")}</span>${on ? icon("check") : "<span></span>"}</button>`;
+        return `<button class="pick${on ? " on" : ""}" type="button" data-act="pick" data-name="${esc(a.name)}" data-path="${esc(a.path || "")}">${appIconHTML(a.path || a.name, "width:22px;height:22px;border-radius:5px;font-size:11px")}<span class="name">${esc(a.name)}</span><span class="pid mono">PID ${a.pid || ""}</span><span class="path">${esc(a.path || "")}</span>${on ? icon("check") : "<span></span>"}</button>`;
       }).join("") : `<div class="empty">Список появится на Windows среди запущенных процессов.</div>`}</div></div>
       <div style="height:14px"></div><label class="lbl">Действие</label>
       <div class="seg">${[["proxy", "прокси"], ["direct", "напрямую"], ["block", "блокировать"]].map(([v, l]) => `<button type="button" data-act="raction" data-value="${v}" class="${act === v ? "on" : ""}">${l}</button>`).join("")}</div>
@@ -775,13 +809,8 @@ function trayHTML() {
   </div>`;
 }
 
-async function api(path, body) {
-  const r = await fetch(path, body === undefined && path.startsWith("/api/") && !path.endsWith("state") && !path.endsWith("processes")
-    ? { method: "GET" } : undefined);
-  return r;
-}
 async function post(path, body) {
-  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const r = await apiFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || "ошибка");
   return data;
@@ -834,14 +863,25 @@ function renderDirty() {
     if (changed) n = changed;
   } catch (e) { /* keep 1 */ }
   bar.hidden = false;
-  bar.innerHTML = `<div><div class="t">${esc(unsavedLabel(n))}</div><div class="d">${esc(dirtyHint())} · Ctrl+S</div></div><div class="actions"><button class="btn" type="button" data-act="rules-revert">Отменить</button><button class="btn pri" type="button" data-act="rules-save">Сохранить</button></div>`;
+  setHTML(bar, `<div><div class="t">${esc(unsavedLabel(n))}</div><div class="d">${esc(dirtyHint())} · Ctrl+S</div></div><div class="actions"><button class="btn" type="button" data-act="rules-revert">Отменить</button><button class="btn pri" type="button" data-act="rules-save">Сохранить</button></div>`);
 }
+let reqSeq = 0;
+let shownSeq = 0;
 async function refresh() {
   if (DEMO) { render(); return; }
+  const seq = ++reqSeq;
   try {
-    const r = await fetch("/api/state");
+    // With the last generation the server skips the event list when no
+    // connection was logged since.
+    const gen = state && state.events ? state.generation || 0 : 0;
+    const r = await apiFetch("/api/state?gen=" + gen);
     if (!r.ok) return;
     const next = await r.json();
+    // Requests can overlap (poll plus a save); never show an older answer
+    // over a newer one.
+    if (seq < shownSeq) return;
+    shownSeq = seq;
+    if (next.eventsSame) next.events = (state && state.events) || [];
     const err = next.error;
     next.error = "";
     const keep = rulesDirty && state ? cfg().rules : null;
@@ -965,7 +1005,7 @@ async function openRule(index) {
     return;
   }
   try {
-    const r = await fetch("/api/processes");
+    const r = await apiFetch("/api/processes");
     modal.apps = await r.json();
     renderModal();
   } catch (e) { /* picker stays empty */ }
@@ -1149,8 +1189,20 @@ function linkFail(msg) {
   if (!rest || rest === String(msg || "").trim()) return "Ссылка не разобрана";
   return "Ссылка не разобрана. " + rest;
 }
+// readRuleDraft copies the dialog's inputs into the draft before it is
+// redrawn, so typing in the search box or switching the action keeps the
+// chosen process and proxy.
+function readRuleDraft() {
+  if (!modal || modal.kind !== "rule") return;
+  const proc = document.getElementById("r-proc");
+  if (proc) modal.draft.process = proc.value;
+  const px = document.getElementById("r-proxy");
+  if (px && !px.disabled && px.value) modal.draft.proxy = px.value;
+}
 function commitRule() {
-  const proc = document.getElementById("r-proc").value.trim();
+  let proc = document.getElementById("r-proc").value.trim().replace(/^"+|"+$/g, "");
+  // "chrome" means chrome.exe; a bare name never matched before.
+  if (proc && !/[\\/]/.test(proc) && !/^[A-Za-z]:/.test(proc) && !/\.[A-Za-z0-9]+$/.test(proc)) proc += ".exe";
   modal.draft.process = proc;
   if (modal.draft.action === "proxy") modal.draft.proxy = document.getElementById("r-proxy").value;
   else modal.draft.proxy = "";
@@ -1175,11 +1227,20 @@ function chosenProcess(name, path) {
 function proxyInUse(name) {
   return (cfg().rules || []).some((r) => r.proxy === name) || (cfg().dns.includeSystemResolver && cfg().dns.systemResolverProxy === name);
 }
+// dnsServer adds the default port to a bare IP: "1.1.1.1" -> "1.1.1.1:53".
+function dnsServer(s) {
+  s = String(s || "").trim();
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return s + ":53";
+  if (/^[0-9a-f]*:[0-9a-f:]*:[0-9a-f]*$/i.test(s) && !s.startsWith("[")) return "[" + s + "]:53";
+  return s;
+}
 function readSettings() {
   const c = cfg();
   c.dns = c.dns || {};
   c.dns.mode = document.querySelector('[data-key="dns"]').classList.contains("on") ? "proxy" : "original";
-  c.dns.servers = document.getElementById("dns-servers").value.split(",").map((s) => s.trim()).filter(Boolean);
+  const dnsInput = document.getElementById("dns-servers");
+  c.dns.servers = dnsInput.value.split(/[,\s]+/).map(dnsServer).filter(Boolean);
+  if (c.dns.servers.length) dnsInput.value = c.dns.servers.join(", ");
   c.dns.includeSystemResolver = document.querySelector('[data-key="sys"]').classList.contains("on");
   const sp = document.getElementById("sys-proxy");
   c.dns.systemResolverProxy = sp ? sp.value : "";
@@ -1207,12 +1268,10 @@ function onClick(e) {
   if (id === "goto") { page = act.dataset.page; built = ""; render(); return; }
   if (id === "sel-proxy") { sel.proxy = i; fillProxies(); return; }
   if (id === "sel-log") {
-    const ev = logEvents()[i];
-    sel.log = i;
-    if (ev && ev.status === "error") {
-      const key = eventKey(ev);
-      openErr = openErr === key ? "" : key;
-    }
+    const key = act.dataset.key || "";
+    const ev = logEvents().find((x) => eventKey(x) === key);
+    sel.log = key;
+    if (ev && ev.status === "error") openErr = openErr === key ? "" : key;
     fillLog();
     return;
   }
@@ -1389,23 +1448,24 @@ function onClick(e) {
   if (id === "browse") {
     if (DEMO) return;
     post("/api/browse").then((res) => {
-      if (res.path) { modal.draft.process = res.path; renderModal(); }
+      if (res.path && modal && modal.kind === "rule") { readRuleDraft(); modal.draft.process = res.path; renderModal(); }
     }).catch((err) => { if (err.message && err.message !== "отменено") showToast(err.message); });
     return;
   }
   if (id === "pick") {
+    readRuleDraft();
     modal.draft.process = chosenProcess(act.dataset.name, act.dataset.path);
     renderModal();
     return;
   }
   if (id === "raction") {
-    modal.draft.process = document.getElementById("r-proc").value;
+    readRuleDraft();
     modal.draft.action = act.dataset.value;
     renderModal();
     return;
   }
   if (id === "renabled") {
-    modal.draft.process = document.getElementById("r-proc").value;
+    readRuleDraft();
     modal.draft.enabled = modal.draft.enabled === false;
     renderModal();
   }
@@ -1582,11 +1642,15 @@ function bootChrome() {
     if (e.target.id === "log-filter") { logFilter = e.target.value; fillLog(); }
     if (e.target.id === "r-find" && modal) {
       modal.q = e.target.value;
-      modal.draft.process = document.getElementById("r-proc").value;
+      readRuleDraft();
       renderModal();
       const again = document.getElementById("r-find");
       if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
     }
+  });
+  // Text and select settings save when the user finishes editing, not on
+  // every keystroke: a half-typed DNS address used to pop an error.
+  document.body.addEventListener("change", (e) => {
     if (page === "settings" && e.target.closest(".page") && (e.target.id === "dns-servers" || e.target.id === "sys-proxy")) queueSettings();
   });
   document.body.addEventListener("mouseover", (e) => {
@@ -1661,6 +1725,13 @@ async function main() {
   await refresh();
   if (state && !(cfg().proxies || []).length) pasteVLESS(true);
   clipboardTried = true;
-  setInterval(() => { if (!modal) refresh(); }, 250);
+  poll();
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && !modal) refresh(); });
+}
+// poll waits for each answer before asking again, so slow replies cannot
+// pile up, and slows down while the window is hidden in the tray.
+async function poll() {
+  if (!modal) await refresh();
+  setTimeout(poll, document.hidden ? 2000 : 250);
 }
 main();

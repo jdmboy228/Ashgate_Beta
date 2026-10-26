@@ -30,8 +30,20 @@ type udpFlow struct {
 	live   bool
 	closed bool
 	sess   dialer.Session
-	mu     sync.Mutex
+	// failedAt is the last failed DialUDP. While the proxy is down, packets
+	// within udpRetry of it are dropped instead of each starting a new
+	// association and logging another error.
+	failedAt time.Time
+	mu       sync.Mutex
 }
+
+const (
+	udpRetry = 3 * time.Second
+	// httpDNSParallel bounds concurrent DNS-over-CONNECT queries. Each one
+	// is a full TCP round trip, so running them inline would let four slow
+	// lookups stall every proxied UDP flow.
+	httpDNSParallel = 32
+)
 
 func (f *udpFlow) touch(t time.Time) {
 	f.last.Store(t.UnixNano())
@@ -47,7 +59,16 @@ func (e *Engine) ForwardUDP(ctx context.Context, d UDPDatagram) error {
 	}
 	flow.touch(e.now())
 	if flow.proxy.Type == "http" {
-		return e.forwardHTTPDns(ctx, flow, d.Payload)
+		select {
+		case e.dnsSem <- struct{}{}:
+			go func() {
+				defer func() { <-e.dnsSem }()
+				_ = e.forwardHTTPDns(ctx, flow, d.Payload)
+			}()
+			return nil
+		default:
+			return e.forwardHTTPDns(ctx, flow, d.Payload)
+		}
 	}
 	return e.forwardSOCKS(ctx, flow, d)
 }
@@ -72,8 +93,12 @@ func (e *Engine) forwardSOCKS(ctx context.Context, flow *udpFlow, d UDPDatagram)
 		return nil
 	}
 	if flow.sess == nil {
+		if !flow.failedAt.IsZero() && e.now().Sub(flow.failedAt) < udpRetry {
+			return nil
+		}
 		sess, err := e.dial.DialUDP(ctx, flow.proxy)
 		if err != nil {
+			flow.failedAt = e.now()
 			e.log(logbuf.Event{Process: display(flow.proc), PID: flow.proc.PID, Proto: "UDP", Dest: flow.orig.String(), Via: flow.proxy.Name, Status: "error", Error: err.Error()})
 			return err
 		}
@@ -167,8 +192,22 @@ func (e *Engine) Janitor(ctx context.Context) {
 	}
 }
 
+// cacheAge is how often the direct/block caches age. A flow idle for one to
+// two intervals is classified again on its next packet, which gives the same
+// answer; the caches no longer grow with every connection the machine makes.
+const cacheAge = 2 * time.Minute
+
 func (e *Engine) sweep(now time.Time) {
 	e.mu.Lock()
+	if e.rotatedAt.IsZero() {
+		e.rotatedAt = now
+	} else if now.Sub(e.rotatedAt) >= cacheAge {
+		e.rotatedAt = now
+		e.directTCP.rotate()
+		e.directUDP.rotate()
+		e.blockTCP.rotate()
+		e.blockUDP.rotate()
+	}
 	var staleTCP []*tcpFlow
 	for _, f := range e.byClient {
 		f.mu.Lock()

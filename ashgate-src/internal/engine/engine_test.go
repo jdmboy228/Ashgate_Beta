@@ -354,6 +354,10 @@ func TestHTTPUDPBlockedAndDNS(t *testing.T) {
 	if err := e.ForwardUDP(ctx, *res.UDP); err != nil {
 		t.Fatal(err)
 	}
+	// DNS over CONNECT runs in the background.
+	for wait := time.Now().Add(3 * time.Second); inj.count() == 0 && time.Now().Before(wait); {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if inj.count() != 1 {
 		t.Fatalf("injected %d", inj.count())
 	}
@@ -474,5 +478,66 @@ func TestBlockDropsTCPAndUDP(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("blocked events = %d, log %v", n, logs.Snapshot())
+	}
+}
+
+func TestDirectCacheAges(t *testing.T) {
+	e, _ := newEngine(t, testConfig(), fixedRes{p: rules.Process{PID: 7, Name: "other.exe"}, ok: true}, &fakeDial{}, nil)
+	start := time.Unix(1000, 0)
+	for i := 0; i < 50; i++ {
+		pkt, _ := packet.BuildTCP(packet.V4(10, 0, 0, 2, uint16(3000+i)), packet.V4(1, 2, 3, 4, 80), 0x02)
+		if res := e.HandlePacket(pkt, Meta{}, true); res.Action != ActionPass {
+			t.Fatalf("unmatched app should pass, got %v", res.Action)
+		}
+	}
+	if n := e.directTCP.len(); n != 50 {
+		t.Fatalf("direct cache %d", n)
+	}
+	e.sweep(start)
+	e.sweep(start.Add(cacheAge))
+	e.sweep(start.Add(2 * cacheAge))
+	if n := e.directTCP.len(); n != 0 {
+		t.Fatalf("idle direct entries kept: %d", n)
+	}
+}
+
+type failUDP struct {
+	fakeDial
+	mu    sync.Mutex
+	tries int
+}
+
+func (f *failUDP) DialUDP(context.Context, config.Proxy) (dialer.Session, error) {
+	f.mu.Lock()
+	f.tries++
+	f.mu.Unlock()
+	return nil, io.ErrUnexpectedEOF
+}
+
+func TestUDPDialBacksOff(t *testing.T) {
+	fd := &failUDP{}
+	cfg := testConfig()
+	cfg.DNS.Mode = "original"
+	e, logs := newEngine(t, cfg, fixedRes{p: rules.Process{Name: "curl.exe", PID: 5}, ok: true}, fd, nil)
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		pkt, _ := packet.BuildUDP(packet.V4(10, 9, 8, 7, 1900), packet.V4(9, 9, 9, 9, 3478), []byte{1})
+		res := e.HandlePacket(pkt, Meta{}, true)
+		if res.Action != ActionUDP {
+			t.Fatal(res.Action)
+		}
+		_ = e.ForwardUDP(ctx, *res.UDP)
+	}
+	if fd.tries != 1 {
+		t.Fatalf("dialed %d times while the proxy was down", fd.tries)
+	}
+	errs := 0
+	for _, ev := range logs.Snapshot() {
+		if ev.Status == "error" {
+			errs++
+		}
+	}
+	if errs != 1 {
+		t.Fatalf("%d error lines", errs)
 	}
 }

@@ -23,10 +23,19 @@ func Dial(ctx context.Context, p config.Proxy, host string, port uint16) (net.Co
 	if err != nil {
 		return nil, err
 	}
-	if err := handshake(conn, p, host, port); err != nil {
+	// Bound the CONNECT exchange by ctx (15 s without a deadline) and abort
+	// it when ctx is cancelled, so a silent proxy cannot hang the caller.
+	_ = conn.SetDeadline(deadline(ctx, 15*time.Second))
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
+	err = handshake(conn, p, host, port)
+	if !stop() && err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
 		conn.Close()
 		return nil, err
 	}
+	_ = conn.SetDeadline(time.Time{})
 	return conn, nil
 }
 
@@ -72,9 +81,8 @@ func DNSQuery(ctx context.Context, p config.Proxy, server string, query []byte) 
 	return buf, nil
 }
 
+// handshake runs under the deadline set by Dial.
 func handshake(conn net.Conn, p config.Proxy, host string, port uint16) error {
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	defer conn.SetDeadline(time.Time{})
 	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
 	var b strings.Builder
 	fmt.Fprintf(&b, "CONNECT %s HTTP/1.1\r\n", target)

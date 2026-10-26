@@ -113,11 +113,15 @@ type Engine struct {
 	mu        sync.Mutex
 	byClient  map[packet.Addr]*tcpFlow
 	byAlloc   map[allocKey]*tcpFlow
-	directTCP map[packet.Addr]struct{}
-	directUDP map[udpKey]struct{}
-	blockTCP  map[packet.Addr]struct{}
-	blockUDP  map[udpKey]struct{}
+	directTCP ageSet[packet.Addr]
+	directUDP ageSet[udpKey]
+	blockTCP  ageSet[packet.Addr]
+	blockUDP  ageSet[udpKey]
 	udp       map[udpKey]*udpFlow
+	// rotatedAt is when the direct/block caches last aged; see sweep.
+	rotatedAt time.Time
+
+	dnsSem chan struct{}
 
 	active    atomic.Int64
 	bytesUp   atomic.Int64
@@ -157,11 +161,12 @@ func New(cfg *config.Config, opt Options) (*Engine, error) {
 		now:       opt.Now,
 		byClient:  map[packet.Addr]*tcpFlow{},
 		byAlloc:   map[allocKey]*tcpFlow{},
-		directTCP: map[packet.Addr]struct{}{},
-		directUDP: map[udpKey]struct{}{},
-		blockTCP:  map[packet.Addr]struct{}{},
-		blockUDP:  map[udpKey]struct{}{},
+		directTCP: newAgeSet[packet.Addr](),
+		directUDP: newAgeSet[udpKey](),
+		blockTCP:  newAgeSet[packet.Addr](),
+		blockUDP:  newAgeSet[udpKey](),
 		udp:       map[udpKey]*udpFlow{},
+		dnsSem:    make(chan struct{}, httpDNSParallel),
 	}
 	if e.alloc == nil {
 		e.alloc = OSAllocator{}
@@ -211,10 +216,10 @@ func (e *Engine) Apply(cfg *config.Config) error {
 	}
 	e.snap.Store(snap)
 	e.mu.Lock()
-	e.directTCP = map[packet.Addr]struct{}{}
-	e.directUDP = map[udpKey]struct{}{}
-	e.blockTCP = map[packet.Addr]struct{}{}
-	e.blockUDP = map[udpKey]struct{}{}
+	e.directTCP = newAgeSet[packet.Addr]()
+	e.directUDP = newAgeSet[udpKey]()
+	e.blockTCP = newAgeSet[packet.Addr]()
+	e.blockUDP = newAgeSet[udpKey]()
 	e.mu.Unlock()
 	return nil
 }
@@ -370,13 +375,13 @@ func (e *Engine) fastPath(pkt []byte, h *packet.Header) (Result, bool) {
 			if flow := e.byClient[h.Src]; flow != nil {
 				e.dropFlowLocked(flow)
 			}
-			delete(e.directTCP, h.Src)
-			delete(e.blockTCP, h.Src)
+			e.directTCP.del(h.Src)
+			e.blockTCP.del(h.Src)
 		} else if flow := e.byClient[h.Src]; flow != nil {
 			return e.rewriteForward(pkt, h, flow, snap), true
-		} else if _, ok := e.directTCP[h.Src]; ok {
+		} else if e.directTCP.has(h.Src) {
 			return Result{Action: ActionPass}, true
-		} else if _, ok := e.blockTCP[h.Src]; ok {
+		} else if e.blockTCP.has(h.Src) {
 			return Result{Action: ActionDrop}, true
 		}
 	}
@@ -389,10 +394,10 @@ func (e *Engine) fastPath(pkt []byte, h *packet.Header) (Result, bool) {
 			e.bytesUp.Add(n)
 			return Result{Action: ActionUDP, UDP: datagram(pkt, h, flow)}, true
 		}
-		if _, ok := e.directUDP[key]; ok {
+		if e.directUDP.has(key) {
 			return Result{Action: ActionPass}, true
 		}
-		if _, ok := e.blockUDP[key]; ok {
+		if e.blockUDP.has(key) {
 			return Result{Action: ActionDrop}, true
 		}
 	}
@@ -502,17 +507,17 @@ func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot) Result {
 	key := udpKey{Src: h.Src, Dst: h.Dst}
 	if h.Frag {
-		e.blockUDP[key] = struct{}{}
+		e.blockUDP.add(key)
 		e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: p.Name, Status: "blocked", Error: "fragmented udp dropped"})
 		return Result{Action: ActionDrop}
 	}
 	if p.Type != "socks5" && p.Type != "vless" && h.Dst.Port != 53 {
 		if snap.udpUnsupported == "direct" {
-			e.directUDP[key] = struct{}{}
+			e.directUDP.add(key)
 			e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: "direct", Status: "direct", Error: "http proxy has no udp; sent direct"})
 			return Result{Action: ActionPass}
 		}
-		e.blockUDP[key] = struct{}{}
+		e.blockUDP.add(key)
 		e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: p.Name, Status: "blocked", Error: "http proxy cannot carry this udp flow"})
 		return Result{Action: ActionDrop}
 	}
@@ -620,18 +625,18 @@ func (e *Engine) rewriteForward(pkt []byte, h *packet.Header, flow *tcpFlow, sna
 
 func (e *Engine) rememberDirect(h *packet.Header) {
 	if h.Proto == packet.ProtoTCP {
-		e.directTCP[h.Src] = struct{}{}
+		e.directTCP.add(h.Src)
 		return
 	}
-	e.directUDP[udpKey{Src: h.Src, Dst: h.Dst}] = struct{}{}
+	e.directUDP.add(udpKey{Src: h.Src, Dst: h.Dst})
 }
 
 func (e *Engine) rememberBlock(h *packet.Header) {
 	if h.Proto == packet.ProtoTCP {
-		e.blockTCP[h.Src] = struct{}{}
+		e.blockTCP.add(h.Src)
 		return
 	}
-	e.blockUDP[udpKey{Src: h.Src, Dst: h.Dst}] = struct{}{}
+	e.blockUDP.add(udpKey{Src: h.Src, Dst: h.Dst})
 }
 
 func (e *Engine) destinationBypass(dst packet.Addr, private bool) bool {

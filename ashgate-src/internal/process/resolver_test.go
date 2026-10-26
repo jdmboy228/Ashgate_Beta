@@ -97,3 +97,39 @@ func TestUnnamedProcessIsUnknown(t *testing.T) {
 		t.Fatal("empty image should look unknown so the capture loop can retry")
 	}
 }
+
+func TestReusedPIDGetsNewName(t *testing.T) {
+	r, _ := testResolver(time.Unix(1000, 0))
+	name := "old.exe"
+	dead := false
+	r.SetImage(func(pid uint32) rules.Process { return rules.Process{PID: pid, Name: name} })
+	r.SetExited(func(uint32) bool { return dead })
+	a := packet.V4(10, 0, 0, 1, 1000)
+	r.Observe(packet.ProtoTCP, a, 7, false)
+	if p, _ := r.Lookup(packet.ProtoTCP, a); p.Name != "old.exe" {
+		t.Fatalf("%+v", p)
+	}
+	// PID 7 exits and Windows hands it to another program.
+	name, dead = "new.exe", true
+	b := packet.V4(10, 0, 0, 1, 2000)
+	r.Observe(packet.ProtoTCP, b, 7, false)
+	if p, _ := r.Lookup(packet.ProtoTCP, b); p.Name != "new.exe" {
+		t.Fatalf("reused pid kept the old name: %+v", p)
+	}
+}
+
+func TestPruneDropsExpiredSockets(t *testing.T) {
+	start := time.Unix(1000, 0)
+	r, clock := testResolver(start)
+	for i := 0; i < 100; i++ {
+		r.Observe(packet.ProtoTCP, packet.V4(10, 0, 0, 1, uint16(1000+i)), 5, true)
+	}
+	*clock = start.Add(pruneEvery + closeGrace)
+	r.Observe(packet.ProtoTCP, packet.V4(10, 0, 0, 1, 9), 5, false)
+	r.mu.Lock()
+	n := len(r.exact)
+	r.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expired sockets kept: %d entries", n)
+	}
+}

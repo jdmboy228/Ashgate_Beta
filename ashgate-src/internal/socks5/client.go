@@ -32,19 +32,38 @@ func Dial(ctx context.Context, p config.Proxy, host string, port uint16) (net.Co
 	if err != nil {
 		return nil, err
 	}
-	if err := handshake(conn, p); err != nil {
-		conn.Close()
-		return nil, err
+	done := bound(ctx, conn)
+	err = handshake(conn, p)
+	if err == nil {
+		err = writeRequest(conn, cmdConnect, host, port)
 	}
-	if err := writeRequest(conn, cmdConnect, host, port); err != nil {
-		conn.Close()
-		return nil, err
+	if err == nil {
+		_, err = readReply(conn)
 	}
-	if _, err := readReply(conn); err != nil {
+	if derr := done(); err == nil {
+		err = derr
+	}
+	if err != nil {
 		conn.Close()
 		return nil, err
 	}
 	return conn, nil
+}
+
+// bound limits the whole negotiation to ctx's deadline (15 s without one)
+// and aborts it when ctx is cancelled. Without it a proxy that accepts TCP
+// and then stays silent would hang the caller forever. The returned func
+// clears the deadline and reports whether ctx ended first.
+func bound(ctx context.Context, conn net.Conn) func() error {
+	_ = conn.SetDeadline(deadline(ctx, 15*time.Second))
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
+	return func() error {
+		if !stop() {
+			return ctx.Err()
+		}
+		_ = conn.SetDeadline(time.Time{})
+		return nil
+	}
 }
 
 // Assoc is a SOCKS5 UDP association. The TCP control connection stays open.
@@ -66,13 +85,18 @@ func Associate(ctx context.Context, p config.Proxy) (*Assoc, error) {
 			conn.Close()
 		}
 	}()
-	if err := handshake(conn, p); err != nil {
-		return nil, err
+	done := bound(ctx, conn)
+	err = handshake(conn, p)
+	if err == nil {
+		err = writeRequest(conn, cmdUDP, "0.0.0.0", 0)
 	}
-	if err := writeRequest(conn, cmdUDP, "0.0.0.0", 0); err != nil {
-		return nil, err
+	var bnd *net.UDPAddr
+	if err == nil {
+		bnd, err = readReply(conn)
 	}
-	bnd, err := readReply(conn)
+	if derr := done(); err == nil {
+		err = derr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +153,8 @@ func (a *Assoc) Recv(ctx context.Context) (*net.UDPAddr, []byte, error) {
 		}
 		addr, payload, err := DecodeUDP(buf[:n])
 		if err != nil {
-			return nil, nil, err
+			// One malformed or fragmented datagram must not end the flow.
+			continue
 		}
 		return addr, payload, nil
 	}
@@ -191,9 +216,8 @@ func dialProxy(ctx context.Context, address string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", address)
 }
 
+// handshake runs under the deadline set by bound.
 func handshake(conn net.Conn, p config.Proxy) error {
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	defer conn.SetDeadline(time.Time{})
 	var greet []byte
 	if p.Username != "" || p.Password != "" {
 		greet = []byte{ver5, 1, authUser}

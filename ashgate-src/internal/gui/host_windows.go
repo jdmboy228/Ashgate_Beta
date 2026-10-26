@@ -148,6 +148,10 @@ func Run(configPath string, startCapture bool) error {
 	_ = w.Bind("ashgateMin", func() { pPostMessage.Call(h.hwnd, wmMin, 0, 0) })
 	_ = w.Bind("ashgateMax", func() { pPostMessage.Call(h.hwnd, wmMax, 0, 0) })
 	_ = w.Bind("ashgateClose", func() { pPostMessage.Call(h.hwnd, wmClose, 0, 0) })
+	// Hand the API token to the page before it loads. json.Marshal yields a
+	// safe JavaScript string literal.
+	tok, _ := json.Marshal(h.ctrl.token)
+	w.Init("window.__ashgateToken=" + string(tok) + ";")
 	if err := trayAdd(h.hwnd); err != nil {
 		h.ctrl.mu.Lock()
 		if h.ctrl.errText == "" {

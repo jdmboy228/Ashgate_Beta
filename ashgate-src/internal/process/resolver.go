@@ -11,6 +11,12 @@ import (
 const (
 	closeGrace = 15 * time.Second
 	helperGap  = 50 * time.Millisecond
+	// pruneEvery bounds how often Observe drops expired entries. Without it
+	// every socket the machine ever closed would stay in memory.
+	pruneEvery = 30 * time.Second
+	// maxImages caps the PID cache when the platform cannot tell whether a
+	// process has exited.
+	maxImages = 4096
 )
 
 type exactKey struct {
@@ -38,9 +44,14 @@ type Resolver struct {
 	helperWild map[wildKey]uint32
 	images     map[uint32]rules.Process
 	helperAt   time.Time
+	pruneAt    time.Time
 	now        func() time.Time
 	image      func(pid uint32) rules.Process
 	loadHelper func() ([]Endpoint, error)
+	// exited reports that pid no longer names the process cached for it.
+	// Windows reuses PIDs, so a cached name must be checked before reuse.
+	// Nil means the platform cannot tell; the cache is then only size-capped.
+	exited func(pid uint32) bool
 }
 
 // New returns an empty resolver. On Windows it also queries IP Helper.
@@ -75,9 +86,51 @@ func (r *Resolver) Observe(proto uint8, local packet.Addr, pid uint32, closing b
 	defer r.mu.Unlock()
 	if unspecified(local) {
 		r.wild[wildKey{proto, local.Port}] = e
-		return
+	} else {
+		r.exact[exactKey{proto, local}] = e
 	}
-	r.exact[exactKey{proto, local}] = e
+	if r.pruneAt.IsZero() {
+		r.pruneAt = now
+	} else if now.Sub(r.pruneAt) >= pruneEvery {
+		r.pruneLocked(now)
+	}
+}
+
+// pruneLocked drops closed sockets past their grace period, sockets of
+// processes that have exited (their CLOSE event may have been lost), and
+// cached images of exited processes.
+func (r *Resolver) pruneLocked(now time.Time) {
+	r.pruneAt = now
+	gone := map[uint32]bool{}
+	dead := func(pid uint32) bool {
+		if r.exited == nil {
+			return false
+		}
+		d, ok := gone[pid]
+		if !ok {
+			d = r.exited(pid)
+			gone[pid] = d
+		}
+		return d
+	}
+	for k, e := range r.exact {
+		if !alive(e, now) || dead(e.proc.PID) {
+			delete(r.exact, k)
+		}
+	}
+	for k, e := range r.wild {
+		if !alive(e, now) || dead(e.proc.PID) {
+			delete(r.wild, k)
+		}
+	}
+	for pid := range r.images {
+		if dead(pid) {
+			delete(r.images, pid)
+		}
+	}
+	if len(r.images) > maxImages {
+		clear(r.images)
+	}
 }
 
 // Lookup implements engine.Resolver.
@@ -150,21 +203,16 @@ func (r *Resolver) socketLocked(proto uint8, src packet.Addr, now time.Time) (ru
 	return rules.Process{}, false
 }
 
+// helperLocked returns only the PID. finish resolves the name through
+// resolve, which checks that the cached image still belongs to that PID.
 func (r *Resolver) helperLocked(proto uint8, src packet.Addr) (rules.Process, bool) {
 	if pid, ok := r.helper[exactKey{proto, src}]; ok {
-		return r.cached(pid), true
+		return rules.Process{PID: pid}, true
 	}
 	if pid, ok := r.helperWild[wildKey{proto, src.Port}]; ok {
-		return r.cached(pid), true
+		return rules.Process{PID: pid}, true
 	}
 	return rules.Process{}, false
-}
-
-func (r *Resolver) cached(pid uint32) rules.Process {
-	if p, ok := r.images[pid]; ok && (p.Name != "" || p.Path != "") {
-		return p
-	}
-	return rules.Process{PID: pid}
 }
 
 func (r *Resolver) storeHelper(rows []Endpoint, now time.Time) {
@@ -190,7 +238,15 @@ func (r *Resolver) resolve(pid uint32) rules.Process {
 	p, ok := r.images[pid]
 	r.mu.Unlock()
 	if ok && (p.Name != "" || p.Path != "") {
-		return p
+		if r.exited == nil || !r.exited(pid) {
+			return p
+		}
+		// The process is gone and the PID may now belong to another one.
+		r.mu.Lock()
+		if cur, ok := r.images[pid]; ok && cur == p {
+			delete(r.images, pid)
+		}
+		r.mu.Unlock()
 	}
 	if r.image == nil {
 		return rules.Process{PID: pid}
@@ -232,6 +288,11 @@ func (r *Resolver) SetClock(now func() time.Time) {
 // SetImage overrides process-image lookup. Tests use it.
 func (r *Resolver) SetImage(fn func(pid uint32) rules.Process) {
 	r.image = fn
+}
+
+// SetExited overrides the process-exit check. Tests use it.
+func (r *Resolver) SetExited(fn func(pid uint32) bool) {
+	r.exited = fn
 }
 
 // SetHelper overrides the IP Helper refresh. Tests use it.

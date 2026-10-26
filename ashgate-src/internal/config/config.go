@@ -244,6 +244,25 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// CheckDNSServers reports a DNS server given as a host name. The engine sends
+// queries to an IP, so a name is ignored at run time. Validate still accepts
+// it so older files keep loading; the window refuses to save a new one.
+func (c *Config) CheckDNSServers() error {
+	if c.DNS.Mode != "proxy" {
+		return nil
+	}
+	for _, s := range c.DNS.Servers {
+		host, _, err := splitAddr(s)
+		if err != nil {
+			return fmt.Errorf("dns server %q: %w", s, err)
+		}
+		if net.ParseIP(host) == nil {
+			return fmt.Errorf("dns server %q: must be an IP address", s)
+		}
+	}
+	return nil
+}
+
 // Prepare fills a VLESS proxy from its share link when the structured
 // fields are still empty. A parsed struct is kept, so manual edits win.
 func (p *Proxy) Prepare() error {

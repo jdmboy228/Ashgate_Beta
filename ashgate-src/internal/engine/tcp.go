@@ -85,9 +85,7 @@ func (e *Engine) serveFlow(conn net.Conn, flow *tcpFlow) {
 		Status:  "open",
 	})
 	var up, down atomic.Int64
-	splice(conn, upstream, &up, &down)
-	e.bytesUp.Add(up.Load())
-	e.bytesDown.Add(down.Load())
+	splice(conn, upstream, counter{&up, &e.bytesUp}, counter{&down, &e.bytesDown})
 	e.log(logbuf.Event{
 		Process:   display(flow.proc),
 		PID:       flow.proc.PID,
@@ -135,19 +133,40 @@ func (e *Engine) dropFlowLocked(flow *tcpFlow) {
 	}
 }
 
-func splice(app, upstream net.Conn, up, down *atomic.Int64) {
+// counter adds relayed bytes to a per-flow and an engine-wide total as they
+// move, so the window's traffic figure grows during long transfers instead
+// of jumping when the connection closes.
+type counter struct {
+	flow, total *atomic.Int64
+}
+
+func (c counter) add(n int) {
+	c.flow.Add(int64(n))
+	c.total.Add(int64(n))
+}
+
+type countWriter struct {
+	w io.Writer
+	c counter
+}
+
+func (cw countWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.c.add(n)
+	return n, err
+}
+
+func splice(app, upstream net.Conn, up, down counter) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(upstream, app)
-		up.Add(n)
+		_, _ = io.Copy(countWriter{upstream, up}, app)
 		closeWrite(upstream)
 	}()
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(app, upstream)
-		down.Add(n)
+		_, _ = io.Copy(countWriter{app, down}, upstream)
 		closeWrite(app)
 	}()
 	wg.Wait()

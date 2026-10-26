@@ -321,3 +321,18 @@ func TestDolphinFieldsSurviveRoundTrip(t *testing.T) {
 		t.Fatalf("reload extra %s rules %d", again.Extra["dolphin"], len(again.Rules))
 	}
 }
+
+func TestDNSServerMustBeIP(t *testing.T) {
+	cfg := Default()
+	cfg.DNS.Servers = []string{"dns.google:53"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("older files with a host name must still load: %v", err)
+	}
+	if err := cfg.CheckDNSServers(); err == nil {
+		t.Fatal("host name accepted as dns server")
+	}
+	cfg.DNS.Servers = []string{"[2606:4700::1111]:53", "1.1.1.1:53"}
+	if err := cfg.CheckDNSServers(); err != nil {
+		t.Fatal(err)
+	}
+}

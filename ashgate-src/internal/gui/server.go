@@ -2,13 +2,18 @@ package gui
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +50,22 @@ type controller struct {
 	auto     bool
 	autoAt   time.Time
 	hooks    hooks
+	// token authenticates API calls. Only the WebView window knows it, so
+	// web pages and other local programs cannot drive this elevated process.
+	token string
+	// startMu keeps two Start clicks from opening two capture sessions.
+	startMu sync.Mutex
+}
+
+// tokenHeader carries controller.token on every API request.
+const tokenHeader = "X-Ashgate-Token"
+
+func newToken() string {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func newController(path string, cfg *config.Config, logs *logbuf.Buffer, h hooks) *controller {
@@ -55,6 +76,7 @@ func newController(path string, cfg *config.Config, logs *logbuf.Buffer, h hooks
 	c := &controller{
 		path: path, cfg: cfg, logs: logs, checks: map[string]probe.Report{},
 		bridges: vless.NewManager(), bridgeSt: map[string]vless.Status{}, hooks: h,
+		token: newToken(),
 	}
 	_ = c.syncBridges(cfg)
 	return c
@@ -80,11 +102,36 @@ func (c *controller) shutdown() {
 func (c *controller) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if !c.authorized(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			c.api(w, r)
 			return
 		}
 		static().ServeHTTP(w, r)
 	})
+}
+
+// authorized accepts requests addressed to the loopback listener that carry
+// the window token. The Host check stops DNS-rebinding pages; the token stops
+// cross-site requests and other local programs. Image tags cannot send
+// headers, so the token may also come as the "t" query parameter.
+func (c *controller) authorized(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+	switch strings.Trim(host, "[]") {
+	case "127.0.0.1", "::1", "localhost":
+	default:
+		return false
+	}
+	got := r.Header.Get(tokenHeader)
+	if got == "" {
+		got = r.URL.Query().Get("t")
+	}
+	return c.token != "" && subtle.ConstantTimeCompare([]byte(got), []byte(c.token)) == 1
 }
 
 func (c *controller) api(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +142,10 @@ func (c *controller) api(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, c.snapshot())
+		// The window polls several times a second. When it already has the
+		// newest log generation, skip re-sending up to 300 events.
+		since, _ := strconv.ParseUint(r.URL.Query().Get("gen"), 10, 64)
+		writeJSON(w, http.StatusOK, c.snapshotSince(since))
 	case "/api/start":
 		c.post(w, r, func() (any, error) { return nil, c.start() })
 	case "/api/stop":
@@ -266,6 +316,7 @@ type stateView struct {
 	Checks     map[string]probe.Report `json:"checks"`
 	Bridges    map[string]vless.Status `json:"bridges"`
 	Events     []eventView             `json:"events"`
+	EventsSame bool                    `json:"eventsSame,omitempty"`
 	Generation uint64                  `json:"generation"`
 }
 
@@ -283,6 +334,12 @@ type eventView struct {
 }
 
 func (c *controller) snapshot() stateView {
+	return c.snapshotSince(0)
+}
+
+// snapshotSince leaves Events out and sets EventsSame when the caller
+// already saw log generation since.
+func (c *controller) snapshotSince(since uint64) stateView {
 	c.refreshAuto()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -314,6 +371,12 @@ func (c *controller) snapshot() stateView {
 	for k, v := range c.bridgeSt {
 		bridges[k] = v
 	}
+	g := gen(c.logs)
+	var events []eventView
+	same := since != 0 && since == g
+	if !same {
+		events = eventViews(c.logs)
+	}
 	return stateView{
 		Version:    version.Version,
 		Path:       c.path,
@@ -332,8 +395,9 @@ func (c *controller) snapshot() stateView {
 		Config:     cfg,
 		Checks:     checks,
 		Bridges:    bridges,
-		Events:     eventViews(c.logs),
-		Generation: gen(c.logs),
+		Events:     events,
+		EventsSame: same,
+		Generation: g,
 	}
 }
 
@@ -366,6 +430,8 @@ func (c *controller) running() (bool, int64, string) {
 }
 
 func (c *controller) start() error {
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
 	c.mu.Lock()
 	if c.sess != nil && c.sess.Running() {
 		c.mu.Unlock()
@@ -422,6 +488,9 @@ func (c *controller) replace(next *config.Config) error {
 	cp := cloneCfg(next)
 	cp.ApplyDefaults()
 	if err := cp.Validate(); err != nil {
+		return errors.New(ruConfig(err))
+	}
+	if err := cp.CheckDNSServers(); err != nil {
 		return errors.New(ruConfig(err))
 	}
 	if err := config.Save(c.path, cp); err != nil {
@@ -614,6 +683,10 @@ func ruConfig(err error) string {
 		return "Для системного резолвера выберите прокси."
 	case strings.Contains(s, "process is required"):
 		return "Укажите процесс: имя файла или полный путь."
+	case strings.Contains(s, "dns.servers is required"):
+		return "Укажите хотя бы один DNS-сервер, например 1.1.1.1:53."
+	case strings.HasPrefix(s, "dns server "):
+		return "DNS-сервер указан неверно: нужен IP и порт, например 1.1.1.1:53."
 	default:
 		return s
 	}

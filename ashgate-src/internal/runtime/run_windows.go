@@ -257,9 +257,17 @@ func consume(ctx context.Context, eng *engine.Engine, div *divert, logs *logbuf.
 		for _, h := range pending {
 			if force || now.Sub(h.at) >= holdFor {
 				queue(eng, div, logs, udpCh, &keep, h.pkt, h.addr, true)
-			} else {
-				keep = append(keep, h)
+				continue
 			}
+			// The owning socket's event has often arrived by now. Decide
+			// on this tick instead of always waiting the full holdFor.
+			meta := engine.Meta{IfIdx: h.addr.IfIdx(), SubIfIdx: h.addr.SubIfIdx()}
+			res := eng.HandlePacket(h.pkt, meta, false)
+			if res.Action == engine.ActionUnknown {
+				keep = append(keep, h)
+				continue
+			}
+			apply(div, logs, udpCh, h.pkt, h.addr, res)
 		}
 		pending = keep
 	}

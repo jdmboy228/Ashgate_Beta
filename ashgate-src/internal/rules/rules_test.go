@@ -53,3 +53,13 @@ func TestBase(t *testing.T) {
 		t.Fatal("svchost")
 	}
 }
+
+func TestBareNameMatchesExe(t *testing.T) {
+	s := Compile([]config.Rule{{Process: "Chrome", Action: "direct"}})
+	if d := s.Match(Process{Name: "chrome.exe"}); d.Action != "direct" {
+		t.Fatalf("bare name did not match: %+v", d)
+	}
+	if d := s.Match(Process{Name: "chrome2.exe"}); d.Action != "" {
+		t.Fatalf("matched another program: %+v", d)
+	}
+}

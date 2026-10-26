@@ -41,6 +41,21 @@ type Buffer struct {
 	enc  *json.Encoder
 	file *os.File
 	path string
+	// size tracks the log file length so Add does not stat the file for
+	// every event. The engine logs while holding its packet lock.
+	size int64
+}
+
+// sizeWriter counts bytes written to the log file.
+type sizeWriter struct {
+	f *os.File
+	n *int64
+}
+
+func (w sizeWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	*w.n += int64(n)
+	return n, err
 }
 
 // New returns an in-memory buffer. file may be empty.
@@ -56,19 +71,24 @@ func New(capacity int, file string) (*Buffer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st, statErr := f.Stat(); statErr == nil && st.Size() == 0 {
-		_, _ = f.Write(utf8BOM)
-	}
-	b.file = f
 	b.path = file
-	b.enc = newEncoder(f)
+	b.attach(f)
 	return b, nil
 }
 
-func newEncoder(f *os.File) *json.Encoder {
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	return enc
+// attach makes f the live log file, writing a BOM to a new file.
+func (b *Buffer) attach(f *os.File) {
+	b.size = 0
+	if st, err := f.Stat(); err == nil {
+		b.size = st.Size()
+	}
+	b.file = f
+	w := sizeWriter{f: f, n: &b.size}
+	if b.size == 0 {
+		_, _ = w.Write(utf8BOM)
+	}
+	b.enc = json.NewEncoder(w)
+	b.enc.SetEscapeHTML(false)
 }
 
 // Close closes the optional log file.
@@ -107,7 +127,7 @@ func (b *Buffer) writeLocked(e Event) {
 	if b.file == nil || b.enc == nil {
 		return
 	}
-	if st, err := b.file.Stat(); err == nil && st.Size() >= maxLogBytes {
+	if b.size >= maxLogBytes {
 		b.rotateLocked()
 	}
 	if b.enc != nil {
@@ -128,18 +148,17 @@ func (b *Buffer) rotateLocked() {
 	} else {
 		_ = os.Rename(b.path+".1", b.path+".2")
 	}
-	if err := os.Rename(b.path, b.path+".1"); err != nil {
-		// The live file is gone only after a successful rename. Reopen it.
-	}
+	renamed := os.Rename(b.path, b.path+".1") == nil
 	f, err := os.OpenFile(b.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
-	if st, statErr := f.Stat(); statErr == nil && st.Size() == 0 {
-		_, _ = f.Write(utf8BOM)
+	b.attach(f)
+	if !renamed {
+		// Another program holds the file open, so it could not be renamed.
+		// Try again after another maxLogBytes instead of on every event.
+		b.size = 0
 	}
-	b.file = f
-	b.enc = newEncoder(f)
 }
 
 // Clear drops the in-memory events. A log file, if any, is left as history.

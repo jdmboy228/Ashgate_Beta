@@ -116,3 +116,33 @@ func startEcho(t *testing.T) echoAddr {
 	ta := ln.Addr().(*net.TCPAddr)
 	return echoAddr{host: "127.0.0.1", port: uint16(ta.Port)}
 }
+
+func TestDialTimesOutOnSilentProxy(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		// Accept the greeting, then never answer the CONNECT request.
+		buf := make([]byte, 3)
+		_, _ = io.ReadFull(c, buf)
+		_, _ = c.Write([]byte{5, 0})
+		time.Sleep(5 * time.Second)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = Dial(ctx, config.Proxy{Type: "socks5", Address: ln.Addr().String()}, "1.1.1.1", 443)
+	if err == nil {
+		t.Fatal("silent proxy should fail")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("dial ignored the context deadline: %v", d)
+	}
+}
