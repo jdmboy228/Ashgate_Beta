@@ -89,10 +89,15 @@ type Header struct {
 	PayloadOff int
 	PayloadLen int
 	Frag       bool
-	SYN        bool
-	ACK        bool
-	FIN        bool
-	RST        bool
+	// FragID is the IPv4 identification or the IPv6 fragment header's
+	// identification. It is set only when Frag is.
+	FragID uint32
+	// Ack is the TCP acknowledgment number.
+	Ack uint32
+	SYN bool
+	ACK bool
+	FIN bool
+	RST bool
 }
 
 // Parse fills h from a full IP packet. It does not allocate.
@@ -127,6 +132,9 @@ func parse4(pkt []byte, h *Header) error {
 	frag := binary.BigEndian.Uint16(pkt[6:8])
 	offset := frag & 0x1FFF
 	mf := frag&0x2000 != 0
+	if offset != 0 || mf {
+		h.FragID = uint32(binary.BigEndian.Uint16(pkt[4:6]))
+	}
 	h.Ver = 4
 	h.IHL = ihl
 	h.IPEnd = total
@@ -187,6 +195,7 @@ func parse6(pkt []byte, h *Header) error {
 			}
 			foff := binary.BigEndian.Uint16(pkt[off+2 : off+4])
 			offset := foff >> 3
+			h.FragID = binary.BigEndian.Uint32(pkt[off+4 : off+8])
 			next = pkt[off]
 			off += 8
 			if offset != 0 {
@@ -228,6 +237,7 @@ func parseL4(pkt []byte, h *Header, off, end int) error {
 		h.SYN = flags&0x02 != 0
 		h.RST = flags&0x04 != 0
 		h.ACK = flags&0x10 != 0
+		h.Ack = binary.BigEndian.Uint32(pkt[off+8 : off+12])
 		h.Src.Port = binary.BigEndian.Uint16(pkt[off : off+2])
 		h.Dst.Port = binary.BigEndian.Uint16(pkt[off+2 : off+4])
 		h.PayloadOff = off + doff
@@ -345,6 +355,25 @@ func build6(src, dst Addr, payload []byte) ([]byte, error) {
 	if err := Parse(pkt, &h); err != nil {
 		return nil, err
 	}
+	if err := setTransportChecksum(pkt, &h); err != nil {
+		return nil, err
+	}
+	return pkt, nil
+}
+
+// BuildRST builds a reset from src to dst. seq must be the sequence number
+// dst expects next (the ACK number dst last sent), or dst ignores it.
+func BuildRST(src, dst Addr, seq uint32) ([]byte, error) {
+	pkt, err := BuildTCP(src, dst, 0x04)
+	if err != nil {
+		return nil, err
+	}
+	var h Header
+	if err := Parse(pkt, &h); err != nil {
+		return nil, err
+	}
+	binary.BigEndian.PutUint32(pkt[h.L4Off+4:], seq)
+	binary.BigEndian.PutUint16(pkt[h.L4Off+14:], 0)
 	if err := setTransportChecksum(pkt, &h); err != nil {
 		return nil, err
 	}

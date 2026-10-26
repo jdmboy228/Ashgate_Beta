@@ -182,6 +182,7 @@ func start(parent context.Context, cfg *config.Config, logs *logbuf.Buffer, brid
 			_ = ln6.Close()
 		}
 		wg.Wait()
+		res.Close()
 		_ = netH.Close()
 		_ = sockH.Close()
 		_ = flowH.Close()

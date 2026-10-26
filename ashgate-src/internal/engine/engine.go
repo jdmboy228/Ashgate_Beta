@@ -117,7 +117,11 @@ type Engine struct {
 	directUDP ageSet[udpKey]
 	blockTCP  ageSet[packet.Addr]
 	blockUDP  ageSet[udpKey]
-	udp       map[udpKey]*udpFlow
+	// fragDrop remembers datagrams whose first fragment was dropped, so
+	// their later fragments (which carry no ports) are dropped too instead
+	// of reaching the destination directly.
+	fragDrop ageSet[fragKey]
+	udp      map[udpKey]*udpFlow
 	// rotatedAt is when the direct/block caches last aged; see sweep.
 	rotatedAt time.Time
 
@@ -127,6 +131,24 @@ type Engine struct {
 	bytesUp   atomic.Int64
 	bytesDown atomic.Int64
 	dnsRR     atomic.Uint64
+}
+
+type fragKey struct {
+	src, dst packet.Addr // ports zero
+	id       uint32
+}
+
+func fragOf(h *packet.Header) fragKey {
+	k := fragKey{src: h.Src, dst: h.Dst, id: h.FragID}
+	k.src.Port, k.dst.Port = 0, 0
+	return k
+}
+
+// dropFragment records h's datagram when h is a first fragment.
+func (e *Engine) dropFragment(h *packet.Header) {
+	if h.Frag {
+		e.fragDrop.add(fragOf(h))
+	}
 }
 
 type allocKey struct {
@@ -140,6 +162,7 @@ type snapshot struct {
 	dns            config.DNS
 	udpUnsupported string
 	bypassPrivate  bool
+	killSwitch     bool
 	relay4         packet.Addr
 	relay6         packet.Addr
 }
@@ -165,6 +188,7 @@ func New(cfg *config.Config, opt Options) (*Engine, error) {
 		directUDP: newAgeSet[udpKey](),
 		blockTCP:  newAgeSet[packet.Addr](),
 		blockUDP:  newAgeSet[udpKey](),
+		fragDrop:  newAgeSet[fragKey](),
 		udp:       map[udpKey]*udpFlow{},
 		dnsSem:    make(chan struct{}, httpDNSParallel),
 	}
@@ -303,6 +327,7 @@ func compile(cfg *config.Config) (*snapshot, error) {
 		dns:            cfg.DNS,
 		udpUnsupported: cfg.UDPUnsupported,
 		bypassPrivate:  cfg.BypassPrivate,
+		killSwitch:     cfg.KillSwitch,
 		relay4:         r4,
 		relay6:         r6,
 	}, nil
@@ -335,7 +360,20 @@ func parseRelay(addr string, ver int) (packet.Addr, error) {
 // final is set when the capture loop has already held the packet and must decide.
 func (e *Engine) HandlePacket(pkt []byte, meta Meta, final bool) Result {
 	var h packet.Header
-	if err := packet.Parse(pkt, &h); err != nil || h.L4Off == 0 {
+	if err := packet.Parse(pkt, &h); err != nil {
+		return Result{Action: ActionPass}
+	}
+	if h.L4Off == 0 {
+		// A later fragment carries no ports. Drop it when its first
+		// fragment was dropped, or it would reach the destination directly.
+		if h.Frag {
+			e.mu.Lock()
+			drop := e.fragDrop.has(fragOf(&h))
+			e.mu.Unlock()
+			if drop {
+				return Result{Action: ActionDrop}
+			}
+		}
 		return Result{Action: ActionPass}
 	}
 	e.mu.Lock()
@@ -388,6 +426,12 @@ func (e *Engine) fastPath(pkt []byte, h *packet.Header) (Result, bool) {
 	if h.Proto == packet.ProtoUDP {
 		key := udpKey{Src: h.Src, Dst: h.Dst}
 		if flow := e.udp[key]; flow != nil {
+			if h.Frag {
+				// A fragmented datagram cannot be relayed; forwarding the
+				// first piece would send a truncated payload.
+				e.dropFragment(h)
+				return Result{Action: ActionDrop}, true
+			}
 			flow.touch(e.now())
 			n := int64(h.PayloadLen)
 			flow.up.Add(n)
@@ -398,6 +442,7 @@ func (e *Engine) fastPath(pkt []byte, h *packet.Header) (Result, bool) {
 			return Result{Action: ActionPass}, true
 		}
 		if e.blockUDP.has(key) {
+			e.dropFragment(h)
 			return Result{Action: ActionDrop}, true
 		}
 	}
@@ -426,6 +471,7 @@ func (e *Engine) decide(pkt []byte, h *packet.Header, meta Meta, proc rules.Proc
 	}
 
 	dec := snap.rules.Match(proc)
+	parent := dec.Parent
 	proxyName := dec.Proxy
 	action := dec.Action
 	if action == "" && h.Dst.Port == 53 && snap.dns.IncludeSystemResolver && rules.IsSystemDNS(proc.Name) {
@@ -442,16 +488,19 @@ func (e *Engine) decide(pkt []byte, h *packet.Header, meta Meta, proc rules.Proc
 			Dest:    h.Dst.String(),
 			Via:     "direct",
 			Status:  "direct",
+			Parent:  parent,
 		})
 		return Result{Action: ActionPass}
 	case "block":
 		e.rememberBlock(h)
+		e.dropFragment(h)
 		e.log(logbuf.Event{
 			Process: display(proc),
 			PID:     proc.PID,
 			Proto:   protoName(h.Proto),
 			Dest:    h.Dst.String(),
 			Status:  "blocked",
+			Parent:  parent,
 		})
 		return Result{Action: ActionDrop}
 	case "proxy":
@@ -463,20 +512,24 @@ func (e *Engine) decide(pkt []byte, h *packet.Header, meta Meta, proc rules.Proc
 		}
 		if h.Proto == packet.ProtoTCP {
 			if !(h.SYN && !h.ACK) {
+				if snap.killSwitch {
+					return e.resetExisting(h, meta, proc, p, parent)
+				}
 				e.rememberDirect(h)
 				return Result{Action: ActionPass}
 			}
-			return e.startTCP(pkt, h, meta, proc, p, snap)
+			return e.startTCP(pkt, h, meta, proc, p, snap, parent)
 		}
-		return e.startUDP(pkt, h, meta, proc, p, snap)
+		return e.startUDP(pkt, h, meta, proc, p, snap, parent)
 	default:
 		e.rememberDirect(h)
 		return Result{Action: ActionPass}
 	}
 }
 
-func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot) Result {
+func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot, parent string) Result {
 	if h.Frag {
+		e.dropFragment(h)
 		e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "TCP", Dest: h.Dst.String(), Via: p.Name, Status: "blocked", Error: "fragmented tcp dropped"})
 		return Result{Action: ActionDrop}
 	}
@@ -497,6 +550,7 @@ func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 		subIfIdx: meta.SubIfIdx,
 		created:  e.now(),
 		live:     true,
+		parent:   parent,
 	}
 	e.byClient[h.Src] = flow
 	e.byAlloc[allocKey{ver: h.Ver, port: port}] = flow
@@ -504,15 +558,32 @@ func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 	return e.rewriteForward(pkt, h, flow, snap)
 }
 
-func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot) Result {
+// resetExisting handles a TCP connection of a proxied application that was
+// open before capture started. It cannot be moved to the proxy, so with the
+// kill switch it is dropped and the application gets a reset, which makes
+// it reconnect through the proxy instead of staying direct.
+func (e *Engine) resetExisting(h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, parent string) Result {
+	e.rememberBlock(h)
+	if inj := e.injector(); inj != nil && !h.RST {
+		if rst, err := packet.BuildRST(h.Dst, h.Src, h.Ack); err == nil {
+			_ = inj.InjectInbound(rst, meta.IfIdx, meta.SubIfIdx)
+		}
+	}
+	e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "TCP", Dest: h.Dst.String(), Via: p.Name, Status: "blocked",
+		Error: "kill switch: соединение открыто до запуска перехвата, сброшено", Parent: parent})
+	return Result{Action: ActionDrop}
+}
+
+func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot, parent string) Result {
 	key := udpKey{Src: h.Src, Dst: h.Dst}
 	if h.Frag {
 		e.blockUDP.add(key)
+		e.dropFragment(h)
 		e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: p.Name, Status: "blocked", Error: "fragmented udp dropped"})
 		return Result{Action: ActionDrop}
 	}
 	if p.Type != "socks5" && p.Type != "vless" && h.Dst.Port != 53 {
-		if snap.udpUnsupported == "direct" {
+		if snap.udpUnsupported == "direct" && !snap.killSwitch {
 			e.directUDP.add(key)
 			e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: "direct", Status: "direct", Error: "http proxy has no udp; sent direct"})
 			return Result{Action: ActionPass}
@@ -528,15 +599,16 @@ func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 		}
 	}
 	flow := &udpFlow{
-		key:   key,
-		app:   h.Src,
-		orig:  h.Dst,
-		relay: relay,
-		proxy: p,
-		proc:  proc,
-		ifIdx: meta.IfIdx,
-		sub:   meta.SubIfIdx,
-		live:  true,
+		key:    key,
+		app:    h.Src,
+		orig:   h.Dst,
+		relay:  relay,
+		proxy:  p,
+		proc:   proc,
+		ifIdx:  meta.IfIdx,
+		sub:    meta.SubIfIdx,
+		live:   true,
+		parent: parent,
 	}
 	flow.touch(e.now())
 	n := int64(h.PayloadLen)
@@ -544,7 +616,7 @@ func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 	e.bytesUp.Add(n)
 	e.udp[key] = flow
 	e.active.Add(1)
-	e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: p.Name, Status: "open"})
+	e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: p.Name, Status: "open", Parent: parent})
 	return Result{Action: ActionUDP, UDP: datagram(pkt, h, flow)}
 }
 

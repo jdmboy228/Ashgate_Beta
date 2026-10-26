@@ -541,3 +541,75 @@ func TestUDPDialBacksOff(t *testing.T) {
 		t.Fatalf("%d error lines", errs)
 	}
 }
+
+func TestChildProcessIsProxied(t *testing.T) {
+	child := rules.Process{PID: 77, Name: "helper.exe", Parents: []rules.Process{{PID: 76, Name: "curl.exe"}}}
+	e, _ := newEngine(t, testConfig(), fixedRes{p: child, ok: true}, &fakeDial{}, nil)
+	pkt, _ := packet.BuildTCP(packet.V4(10, 0, 0, 2, 3100), packet.V4(1, 2, 3, 4, 443), 0x02)
+	res := e.HandlePacket(pkt, Meta{}, true)
+	if res.Action != ActionModified {
+		t.Fatalf("child of a proxied app went %v", res.Action)
+	}
+	e.mu.Lock()
+	flow := e.byClient[packet.V4(10, 0, 0, 2, 3100)]
+	e.mu.Unlock()
+	if flow == nil || flow.proxy.Name != "socks" || flow.parent != "curl.exe" {
+		t.Fatalf("flow %+v", flow)
+	}
+}
+
+func TestKillSwitchResetsExistingConnection(t *testing.T) {
+	cfg := testConfig()
+	cfg.KillSwitch = true
+	inj := &memInj{}
+	e, _ := newEngine(t, cfg, fixedRes{p: rules.Process{PID: 5, Name: "curl.exe"}, ok: true}, &fakeDial{}, inj)
+	data, _ := packet.BuildTCP(packet.V4(10, 0, 0, 2, 3000), packet.V4(1, 2, 3, 4, 443), 0x18)
+	if res := e.HandlePacket(data, Meta{}, true); res.Action != ActionDrop {
+		t.Fatalf("pre-existing proxied connection went %v", res.Action)
+	}
+	if inj.count() != 1 {
+		t.Fatalf("no reset injected")
+	}
+	var h packet.Header
+	if err := packet.Parse(inj.packet(0), &h); err != nil || !h.RST || h.Dst.String() != "10.0.0.2:3000" {
+		t.Fatalf("reset %+v %v", h, err)
+	}
+	again, _ := packet.BuildTCP(packet.V4(10, 0, 0, 2, 3000), packet.V4(1, 2, 3, 4, 443), 0x18)
+	if res := e.HandlePacket(again, Meta{}, true); res.Action != ActionDrop {
+		t.Fatal("second packet passed")
+	}
+}
+
+func TestKillSwitchBlocksUnsupportedUDP(t *testing.T) {
+	cfg := testConfig()
+	cfg.KillSwitch = true
+	cfg.UDPUnsupported = "direct"
+	e, _ := newEngine(t, cfg, fixedRes{p: rules.Process{PID: 3, Name: "browser.exe", Path: `C:\Apps\browser.exe`}, ok: true}, &fakeDial{}, nil)
+	quic, _ := packet.BuildUDP(packet.V4(10, 0, 0, 4, 4444), packet.V4(1, 2, 3, 4, 443), []byte("quic"))
+	if res := e.HandlePacket(quic, Meta{}, true); res.Action != ActionDrop {
+		t.Fatalf("udp leaked past an http proxy: %v", res.Action)
+	}
+}
+
+func TestLaterFragmentsOfDroppedDatagramAreDropped(t *testing.T) {
+	cfg := testConfig()
+	e, _ := newEngine(t, cfg, fixedRes{p: rules.Process{PID: 3, Name: "browser.exe", Path: `C:\Apps\browser.exe`}, ok: true}, &fakeDial{}, nil)
+	first, _ := packet.BuildUDP(packet.V4(10, 0, 0, 4, 4444), packet.V4(1, 2, 3, 4, 443), make([]byte, 64))
+	first[4], first[5] = 0x12, 0x34 // identification
+	first[6] = 0x20                 // more fragments
+	if res := e.HandlePacket(first, Meta{}, true); res.Action != ActionDrop {
+		t.Fatalf("first fragment %v", res.Action)
+	}
+	rest, _ := packet.BuildUDP(packet.V4(10, 0, 0, 4, 1), packet.V4(1, 2, 3, 4, 1), make([]byte, 64))
+	rest[4], rest[5] = 0x12, 0x34
+	rest[6], rest[7] = 0x00, 0x09 // offset 72 bytes, last fragment
+	if res := e.HandlePacket(rest, Meta{}, true); res.Action != ActionDrop {
+		t.Fatalf("later fragment leaked: %v", res.Action)
+	}
+	other, _ := packet.BuildUDP(packet.V4(10, 0, 0, 4, 1), packet.V4(1, 2, 3, 4, 1), make([]byte, 64))
+	other[4], other[5] = 0x99, 0x99
+	other[6], other[7] = 0x00, 0x09
+	if res := e.HandlePacket(other, Meta{}, true); res.Action != ActionPass {
+		t.Fatalf("unrelated fragment %v", res.Action)
+	}
+}

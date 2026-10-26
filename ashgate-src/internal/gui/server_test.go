@@ -8,7 +8,10 @@ import (
 	"testing"
 
 	"ashgate/internal/config"
+	"ashgate/internal/killswitch"
 	"ashgate/internal/logbuf"
+	"ashgate/internal/probe"
+	"ashgate/internal/vless"
 )
 
 func TestControllerSavesBlockRule(t *testing.T) {
@@ -141,4 +144,35 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestKillSwitchBlocksWhileStopped(t *testing.T) {
+	dir := t.TempDir()
+	var lines []string
+	fw := killswitch.NewWithRunner(filepath.Join(dir, "killswitch.json"), func(l string) error {
+		lines = append(lines, l)
+		return nil
+	})
+	cfg := config.Default()
+	cfg.KillSwitch = true
+	cfg.Proxies = []config.Proxy{{Name: "p", Type: "socks5", Address: "127.0.0.1:1080"}}
+	cfg.Rules = []config.Rule{
+		{Process: `C:\Apps\app.exe`, Action: "proxy", Proxy: "p"},
+		{Process: "nowhere", Action: "proxy", Proxy: "p"},
+		{Process: `C:\Apps\direct.exe`, Action: "direct"},
+	}
+	c := &controller{path: filepath.Join(dir, "config.json"), cfg: cfg, checks: map[string]probe.Report{},
+		bridgeSt: map[string]vless.Status{}, hooks: hooks{firewall: fw}}
+	c.syncKill()
+	if got := fw.Blocked(); len(got) != 1 || got[0] != `C:\Apps\app.exe` {
+		t.Fatalf("blocked %v (netsh %v)", got, lines)
+	}
+	if v := c.ksSnapshot(true); len(v.Missing) != 1 || v.Missing[0] != "nowhere" {
+		t.Fatalf("missing %+v", v)
+	}
+	c.cfg.KillSwitch = false
+	c.syncKill()
+	if got := fw.Blocked(); len(got) != 0 {
+		t.Fatalf("switch off left %v", got)
+	}
 }

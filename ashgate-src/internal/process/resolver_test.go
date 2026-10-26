@@ -133,3 +133,42 @@ func TestPruneDropsExpiredSockets(t *testing.T) {
 		t.Fatalf("expired sockets kept: %d entries", n)
 	}
 }
+
+func TestParentChain(t *testing.T) {
+	r, _ := testResolver(time.Unix(1000, 0))
+	procs := map[uint32]rules.Process{
+		1:  {Name: "explorer.exe", Started: 10},
+		20: {Name: "code.exe", PPID: 1, Started: 20},
+		30: {Name: "node.exe", PPID: 20, Started: 30},
+		40: {Name: "late.exe", PPID: 50, Started: 40},
+		50: {Name: "reused.exe", PPID: 1, Started: 99}, // started after its "child"
+	}
+	r.SetImage(func(pid uint32) rules.Process { p := procs[pid]; p.PID = pid; return p })
+	a := packet.V4(10, 0, 0, 1, 1000)
+	r.Observe(packet.ProtoTCP, a, 30, false)
+	p, _ := r.Lookup(packet.ProtoTCP, a)
+	if len(p.Parents) != 2 || p.Parents[0].Name != "code.exe" || p.Parents[1].Name != "explorer.exe" {
+		t.Fatalf("chain %+v", p.Parents)
+	}
+	b := packet.V4(10, 0, 0, 1, 2000)
+	r.Observe(packet.ProtoTCP, b, 40, false)
+	if p, _ := r.Lookup(packet.ProtoTCP, b); len(p.Parents) != 0 {
+		t.Fatalf("reused parent pid accepted: %+v", p.Parents)
+	}
+}
+
+func TestWithParents(t *testing.T) {
+	got := WithParents([]rules.Process{
+		{PID: 1, Name: "explorer.exe", Started: 1},
+		{PID: 2, Name: "code.exe", PPID: 1, Started: 2},
+		{PID: 3, Name: "node.exe", PPID: 2, Started: 3},
+		{PID: 4, Name: "orphan.exe", PPID: 9, Started: 4},
+		{PID: 5, Name: "loop.exe", PPID: 5, Started: 5},
+	})
+	if n := got[2].Parents; len(n) != 2 || n[0].Name != "code.exe" || n[1].Name != "explorer.exe" {
+		t.Fatalf("%+v", n)
+	}
+	if len(got[3].Parents) != 0 || len(got[4].Parents) != 0 {
+		t.Fatal("orphan or self-parent got a chain")
+	}
+}

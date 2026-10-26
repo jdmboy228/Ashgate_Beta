@@ -27,6 +27,7 @@ type tcpFlow struct {
 	created  time.Time
 	conn     net.Conn
 	live     bool
+	parent   string
 	mu       sync.Mutex
 }
 
@@ -72,6 +73,7 @@ func (e *Engine) serveFlow(conn net.Conn, flow *tcpFlow) {
 			Via:     flow.proxy.Name,
 			Status:  "error",
 			Error:   err.Error(),
+			Parent:  flow.parent,
 		})
 		return
 	}
@@ -83,6 +85,7 @@ func (e *Engine) serveFlow(conn net.Conn, flow *tcpFlow) {
 		Dest:    flow.orig.String(),
 		Via:     flow.proxy.Name,
 		Status:  "open",
+		Parent:  flow.parent,
 	})
 	var up, down atomic.Int64
 	splice(conn, upstream, counter{&up, &e.bytesUp}, counter{&down, &e.bytesDown})
@@ -95,6 +98,7 @@ func (e *Engine) serveFlow(conn net.Conn, flow *tcpFlow) {
 		Status:    "closed",
 		BytesUp:   up.Load(),
 		BytesDown: down.Load(),
+		Parent:    flow.parent,
 	})
 }
 

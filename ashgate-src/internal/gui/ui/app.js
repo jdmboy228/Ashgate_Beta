@@ -164,6 +164,7 @@ function demoState() {
       relay: { tcp4: "127.0.0.1:34010", tcp6: "[::1]:34010" },
       dns: { mode: "proxy", servers: ["1.1.1.1:53", "8.8.8.8:53"], includeSystemResolver: false, systemResolverProxy: "local" },
       bypassPrivate: true,
+      killSwitch: true,
       udpUnsupported: "block",
       log: { level: "info" },
       ui: { theme: "dark" },
@@ -198,6 +199,7 @@ function demoState() {
       { time: "12:04:20", process: "curl.exe", pid: 9012, proto: "TCP", dest: "example.com:80", via: "local", status: "closed", bytesUp: 100, bytesDown: 1600 },
     ],
     generation: 8,
+    killSwitch: { on: true, blocked: [], missing: [] },
   };
 }
 
@@ -221,7 +223,8 @@ function paintChrome() {
   if (!side) return;
   const sideName = running ? "Работает" : "Остановлен";
   const traffic = state ? bytes((state.bytesUp || 0) + (state.bytesDown || 0)) : "0 Б";
-  const sideSub = running ? (state.active || 0) + " потоков · " + traffic : "перехват выключен";
+  const ksBlocked = state && state.killSwitch && state.killSwitch.on && (state.killSwitch.blocked || []).length;
+  const sideSub = running ? (state.active || 0) + " потоков · " + traffic : (ksBlocked ? "kill switch: приложения без сети" : "перехват выключен");
   side.className = "side-card" + (running ? " run" : "");
   // The Start/Stop button is rebuilt only when the state flips; the live
   // traffic line is updated in place so clicks on the button are not lost.
@@ -286,6 +289,9 @@ function settingsHTML() {
     row("DNS-серверы", "Куда отправлять эти запросы", `<input class="mono" id="dns-servers" value="${esc((c.dns.servers || []).join(", "))}" ${dnsOn ? "" : "disabled"}>`),
     row("Системный резолвер (svchost.exe)", "Влияет на DNS всех программ, не только выбранных", `${select("sys-proxy", names, selProxy, !sys)}${toggle("sys", sys)}`, true),
   ])}
+  ${group("Защита от утечек", [
+    row("Kill switch", "Приложения с правилом «прокси» и их дочерние процессы никогда не выходят в сеть напрямую. Пока перехват выключен или Ashgate закрыт, Брандмауэр Windows отключает их от сети", toggle("kill", !!c.killSwitch), true),
+  ])}
   ${group("UDP и сеть", [
     row("UDP, который прокси не умеет", "Для HTTP-прокси: QUIC и игры. «Блокировать» не даёт обойти прокси", segCtrl("udp", ["Блокировать", "Напрямую"], ["block", "direct"], udp)),
     row("Не проксировать частные сети", "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7 — напрямую", toggle("bypass", !!c.bypassPrivate)),
@@ -336,7 +342,9 @@ function fillHome() {
   }).join(",");
   const trafficV = bytes((state.bytesUp || 0) + (state.bytesDown || 0));
   const trafficS = `↑ ${bytes(state.bytesUp)} · ↓ ${bytes(state.bytesDown)}`;
-  const key = [state.running, via.length, proxies.length, errs.length, checkKey, errs.slice(0, 4).map(eventKey).join(",")].join("|");
+  const ks = state.killSwitch || {};
+  const key = [state.running, via.length, proxies.length, errs.length, checkKey, errs.slice(0, 4).map(eventKey).join(","),
+    !!ks.on, (ks.blocked || []).join(","), (ks.missing || []).join(","), ks.error || ""].join("|");
   if (homeKey === key && host.childElementCount) {
     setText(document.getElementById("traffic-v"), trafficV);
     setText(document.getElementById("traffic-s"), trafficS);
@@ -360,7 +368,7 @@ function fillHome() {
     return `<div class="proxy-line">${typeTag(p.type)}<span class="main">${esc(p.name)}</span><span class="sub">${esc(proxyAddrText(p))}</span>${badge(view.label, view.kind, true, view.detail)}</div>`;
   }).join("");
   const recent = errs.slice(0, 4);
-  host.innerHTML = `<div class="stats">${stats.map((s) => `<div class="stat"><div class="k">${s[0]}</div><div class="v"${s[3] ? ` id="${s[3]}-v"` : ""}>${esc(s[1])}</div><div class="s"${s[3] ? ` id="${s[3]}-s"` : ""}>${esc(s[2])}</div></div>`).join("")}</div>
+  host.innerHTML = `${killBanner(ks)}<div class="stats">${stats.map((s) => `<div class="stat"><div class="k">${s[0]}</div><div class="v"${s[3] ? ` id="${s[3]}-v"` : ""}>${esc(s[1])}</div><div class="s"${s[3] ? ` id="${s[3]}-s"` : ""}>${esc(s[2])}</div></div>`).join("")}</div>
     <div class="section-row"><h3>${active.length ? "Активные прокси" : "Прокси"}</h3><button class="link" data-act="goto" data-page="proxies" type="button">Все прокси</button></div>
     <div class="proxy-list">${lines || `<div class="empty">Прокси ещё нет.</div>`}</div>
     <div class="section-row"><h3>Последние ошибки</h3><button class="link" data-act="goto" data-page="log" type="button">Журнал</button></div>
@@ -372,6 +380,37 @@ function fillHome() {
     ]), recent.length ? "" : "Ошибок на экране нет.")}`;
 }
 
+// killBanner tells what the kill switch is doing right now.
+function killBanner(ks) {
+  if (!ks || !ks.on) return "";
+  const blocked = ks.blocked || [];
+  const missing = ks.missing || [];
+  let title;
+  let text;
+  let cls = "ks-banner";
+  if (state.running) {
+    title = "Kill switch активен";
+    text = "Приложения с прокси не выйдут в сеть напрямую. Если перехват остановится или Ashgate закроется, Брандмауэр Windows отключит их от сети.";
+  } else if (blocked.length) {
+    cls += " warn";
+    title = `Kill switch: ${blocked.length} ${progWord(blocked.length)} без сети`;
+    text = "Перехват выключен, поэтому Брандмауэр Windows блокирует: " + blocked.map((p) => appLabel(p)).join(", ") + ". Нажмите «Старт», чтобы они снова работали через прокси.";
+  } else {
+    title = "Kill switch включён";
+    text = "Блокировать пока нечего: нет включённых правил «прокси» с найденным exe.";
+  }
+  const miss = missing.length ? `<p class="miss">Не найден exe: ${esc(missing.join(", "))}. Пока перехват выключен, эти программы не блокируются — запустите их или укажите полный путь в правиле.</p>` : "";
+  const err = ks.error ? `<p class="miss">Брандмауэр: ${esc(ks.error)}</p>` : "";
+  const btn = !state.running ? `<button class="btn pri sm" type="button" data-act="ks-start">${icon("power", 14)}Старт</button>` : "";
+  return `<div class="${cls}">${icon("shield", 18)}<div class="txt"><strong>${esc(title)}</strong><p>${esc(text)}</p>${miss}${err}</div>${btn}</div>`;
+}
+function progWord(n) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return "программа";
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return "программы";
+  return "программ";
+}
 function fillProxies() {
   const host = document.getElementById("proxy-table");
   if (!host) return;
@@ -404,6 +443,7 @@ function ruleSub(rule) {
   const process = String(rule.process || "");
   const byPath = process.includes("\\") || process.includes("/") || /^[A-Za-z]:/.test(process);
   const bits = [byPath ? "полный путь" : "по имени файла"];
+  if (rule.children !== false) bits.push("с дочерними");
   if (rule.enabled === false) bits.push("выключено");
   return bits.join(" · ");
 }
@@ -490,7 +530,7 @@ function logEvents() {
     if (errorsOnly && e.status !== "error") return false;
     if (logProto !== "all" && e.proto !== logProto) return false;
     if (!q) return true;
-    const blob = ((e.process || "") + " " + (e.dest || "") + " " + (e.via || "")).toLowerCase();
+    const blob = ((e.process || "") + " " + (e.dest || "") + " " + (e.via || "") + " " + (e.parent || "")).toLowerCase();
     return blob.includes(q);
   });
 }
@@ -524,7 +564,7 @@ function fillLog() {
     // Rows are selected by event, not by position: new events push rows down.
     const main = `<tr class="${sel.log === key ? "sel" : ""}" data-act="sel-log" data-key="${esc(key)}">
     <td class="mono">${esc(e.time)}</td>
-    <td><div class="stack"><span class="main">${esc(appLabel(e.process))}</span><span class="sub mono">PID ${e.pid || 0}</span></div></td>
+    <td><div class="stack"><span class="main">${esc(appLabel(e.process))}</span><span class="sub mono">PID ${e.pid || 0}${e.parent ? " · от " + esc(appLabel(e.parent)) : ""}</span></div></td>
     <td><span class="tag${e.proto === "UDP" ? " udp" : ""}">${esc(e.proto || "")}</span></td>
     <td class="mono" style="color:var(--tx)">${esc(e.dest)}</td>
     <td>${esc(viaText(e.via))}</td>
@@ -762,34 +802,71 @@ function ruleDialog() {
   const r = modal.draft;
   const names = (cfg().proxies || []).map((p) => p.name);
   const act = r.action || "proxy";
-  const apps = modal.apps || [];
-  const q = (modal.q || "").toLowerCase();
-  const shown = apps.filter((a) => !q || a.name.toLowerCase().includes(q) || (a.path || "").toLowerCase().includes(q)).slice(0, 8);
   return `<div class="scrim"><form class="dialog" id="dlg">
     <h2>Приложение</h2><div class="dsub">${modal.index < 0 ? "Новое приложение" : "Изменение"}</div>
     <div class="body">
       <label class="lbl">Процесс</label>
-      <div class="proc-line"><div class="field"><input id="r-proc" value="${esc(r.process || "")}" placeholder="telegram.exe" autofocus></div>
+      <div class="proc-line"><div class="field"><input id="r-proc" value="${esc(r.process || "")}" placeholder="Название, например telegram" autocomplete="off" autofocus></div>
       <button class="btn" type="button" data-act="browse">${icon("folder")}Обзор…</button></div>
-      <div class="help">Имя файла (curl.exe) или полный путь — путь сравнивается точно</div>
-      <div class="picker"><div class="field search" style="margin:8px">${icon("search")}<input id="r-find" placeholder="Поиск среди запущенных приложений" value="${esc(modal.q || "")}"></div>
-      <div class="cap">ЗАПУЩЕННЫЕ ПРИЛОЖЕНИЯ</div><div class="list">${shown.length ? shown.map((a) => {
-        const choice = chosenProcess(a.name, a.path);
-        const cur = (r.process || "").toLowerCase();
-        const on = cur === choice.toLowerCase() || cur === (a.name || "").toLowerCase() || (a.path && cur === a.path.toLowerCase());
-        return `<button class="pick${on ? " on" : ""}" type="button" data-act="pick" data-name="${esc(a.name)}" data-path="${esc(a.path || "")}">${appIconHTML(a.path || a.name, "width:22px;height:22px;border-radius:5px;font-size:11px")}<span class="name">${esc(a.name)}</span><span class="pid mono">PID ${a.pid || ""}</span><span class="path">${esc(a.path || "")}</span>${on ? icon("check") : "<span></span>"}</button>`;
-      }).join("") : `<div class="empty">Список появится на Windows среди запущенных процессов.</div>`}</div></div>
+      <div class="help">Начните вводить название — путь к exe найдётся сам. Можно указать имя файла (curl.exe) или полный путь.</div>
+      <div class="picker"><div class="field search" style="margin:8px">${icon("search")}<input id="r-find" placeholder="Поиск среди запущенных и установленных" value="${esc(modal.q || "")}" autocomplete="off"></div>
+      <div id="r-picks">${pickerHTML()}</div></div>
       <div style="height:14px"></div><label class="lbl">Действие</label>
       <div class="seg">${[["proxy", "прокси"], ["direct", "напрямую"], ["block", "блокировать"]].map(([v, l]) => `<button type="button" data-act="raction" data-value="${v}" class="${act === v ? "on" : ""}">${l}</button>`).join("")}</div>
       <div class="rule-extra">
         <div class="rule-proxy"><label class="lbl">Прокси</label><select id="r-proxy" ${act === "proxy" ? "" : "disabled"}>${names.map((n) => `<option value="${esc(n)}" ${n === r.proxy ? "selected" : ""}>${esc(n)}</option>`).join("") || `<option value="">нет прокси</option>`}</select></div>
         <div class="rule-enabled"><label class="lbl">Включено</label><div class="line"><button class="toggle${r.enabled === false ? "" : " on"}" type="button" data-act="renabled" aria-pressed="${r.enabled === false ? "false" : "true"}"><i></i></button><span>${r.enabled === false ? "Выкл" : "Вкл"}</span></div></div>
       </div>
+      <div class="rule-children"><button class="toggle${r.children === false ? "" : " on"}" type="button" data-act="rchildren" aria-pressed="${r.children === false ? "false" : "true"}"><i></i></button><div><div class="t">Включая дочерние процессы</div><div class="help">Всё, что запускает это приложение (помощники, обновления, игры из лаунчера), идёт по этому же правилу. Своё правило у дочернего процесса важнее.</div></div></div>
     </div>
     <div class="footer"><button class="btn pri" type="submit">${modal.index < 0 ? "Добавить" : "Сохранить"}</button><button class="btn" type="button" data-act="cancel">Отмена</button></div>
   </form></div>`;
 }
 
+// pickMatch scores how well an app matches the query; 0 means no match.
+function pickMatch(q, name, path) {
+  if (!q) return 1;
+  const n = String(name || "").toLowerCase();
+  const exe = baseName(path || "").toLowerCase();
+  if (n.startsWith(q) || exe.startsWith(q)) return 3;
+  if (n.includes(q) || exe.includes(q)) return 2;
+  return String(path || "").toLowerCase().includes(q) ? 1 : 0;
+}
+function pickerQuery() {
+  const q = (modal.q || "").trim();
+  if (q) return q.toLowerCase();
+  // The Process field doubles as the search while it holds a name, not a path.
+  const proc = String(modal.draft.process || "").trim();
+  return /[\\/]/.test(proc) || /^[A-Za-z]:/.test(proc) ? "" : proc.replace(/\.exe$/i, "").toLowerCase();
+}
+function pickerHTML() {
+  const r = modal.draft;
+  const q = pickerQuery();
+  const cur = String(r.process || "").toLowerCase();
+  const rank = (list, f) => list.map((a) => [pickMatch(q, f(a), a.path), a]).filter((x) => x[0] > 0)
+    .sort((x, y) => y[0] - x[0]).map((x) => x[1]);
+  const running = rank(modal.apps || [], (a) => a.name).slice(0, q ? 5 : 8);
+  const seen = new Set((modal.apps || []).map((a) => String(a.path || "").toLowerCase()));
+  const installed = q ? rank((modal.installed || []).filter((a) => !seen.has(String(a.path).toLowerCase())), (a) => a.name).slice(0, 6) : [];
+  const row = (name, path, side) => {
+    const choice = chosenProcess(baseName(path) || name, path);
+    const on = cur && (cur === choice.toLowerCase() || cur === String(path || "").toLowerCase());
+    return `<button class="pick${on ? " on" : ""}" type="button" data-act="pick" data-name="${esc(baseName(path) || name)}" data-path="${esc(path || "")}">${appIconHTML(path || name, "width:22px;height:22px;border-radius:5px;font-size:11px")}<span class="name">${esc(name)}</span><span class="pid mono">${esc(side)}</span><span class="path">${esc(path || "")}</span>${on ? icon("check") : "<span></span>"}</button>`;
+  };
+  let html = `<div class="cap">ЗАПУЩЕННЫЕ</div><div class="list">${running.length
+    ? running.map((a) => row(a.name, a.path, a.window ? "окно" : "PID " + (a.pid || ""))).join("")
+    : `<div class="empty">${q ? "Среди запущенных не найдено." : "Запущенных приложений нет."}</div>`}</div>`;
+  if (q) {
+    html += `<div class="cap">УСТАНОВЛЕННЫЕ</div><div class="list">${installed.length
+      ? installed.map((a) => row(a.name, a.path, "установлено")).join("")
+      : `<div class="empty">${modal.installed ? "Не найдено. Укажите путь через «Обзор…»." : "Ищу установленные приложения…"}</div>`}</div>`;
+  }
+  return html;
+}
+function refreshPicker() {
+  const box = document.getElementById("r-picks");
+  if (box && modal && modal.kind === "rule") setHTML(box, pickerHTML());
+}
 function trayHTML() {
   const menu = (running, top) => `<div class="tray-card" style="top:${top}px;${running ? "right:80px" : "left:340px"}">
     <div class="tray-hd"><img src="logo.svg" alt=""><div><b>Ashgate</b><span><i style="background:${running ? "var(--ok)" : "var(--tx3)"}"></i>${running ? "Работает · потоков: 12" : "Остановлен"}</span></div></div>
@@ -1000,15 +1077,26 @@ async function openRule(index) {
       { name: "curl.exe", pid: 9012, path: "C:\\Windows\\System32\\curl.exe" },
       { name: "code.exe", pid: 3344, path: "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" },
     ];
+    modal.installed = [
+      { name: "Telegram Desktop", path: "C:\\Users\\user\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe" },
+      { name: "Discord", path: "C:\\Users\\user\\AppData\\Local\\Discord\\app-1.0.9\\Discord.exe" },
+      { name: "Steam", path: "C:\\Program Files (x86)\\Steam\\steam.exe" },
+    ];
     if (index < 0) modal.draft.process = "telegram.exe";
     renderModal();
     return;
   }
-  try {
-    const r = await apiFetch("/api/processes");
-    modal.apps = await r.json();
-    renderModal();
-  } catch (e) { /* picker stays empty */ }
+  const mine = modal;
+  apiFetch("/api/processes").then((r) => r.json()).then((list) => {
+    if (modal !== mine) return;
+    modal.apps = list;
+    refreshPicker();
+  }).catch(() => { /* picker stays empty */ });
+  apiFetch("/api/installed").then((r) => r.json()).then((list) => {
+    if (modal !== mine) return;
+    modal.installed = list;
+    refreshPicker();
+  }).catch(() => { if (modal === mine) { modal.installed = []; refreshPicker(); } });
 }
 function readProxyDraft() {
   if (!modal || !document.getElementById("p-name")) return;
@@ -1212,6 +1300,7 @@ function commitRule() {
   const list = cfg().rules;
   const item = { ...modal.draft, enabled: modal.draft.enabled !== false };
   if (!item.proxy) delete item.proxy;
+  if (item.children !== false) delete item.children;
   if (modal.index < 0) list.push(item);
   else list[modal.index] = item;
   modal = null;
@@ -1247,6 +1336,7 @@ function readSettings() {
   const udp = document.querySelector('[data-key="udp"].on');
   c.udpUnsupported = udp ? udp.dataset.value : "block";
   c.bypassPrivate = document.querySelector('[data-key="bypass"]').classList.contains("on");
+  c.killSwitch = document.querySelector('[data-key="kill"]').classList.contains("on");
   c.log = c.log || {};
   c.log.level = document.querySelector('[data-key="verbose"]').classList.contains("on") ? "debug" : "info";
   const theme = document.querySelector('[data-key="theme"].on');
@@ -1284,6 +1374,7 @@ function onClick(e) {
     return;
   }
   if (id === "paste-vless") { pasteVLESS(); return; }
+  if (id === "ks-start") { if (!state.running) startStop(); return; }
   if (id === "rules-save") { saveConfig({ rules: true }).catch((err) => showToast(err.message)); return; }
   if (id === "rules-revert") {
     try { cfg().rules = JSON.parse(rulesSnapshot || "[]"); } catch (err) { /* keep */ }
@@ -1464,6 +1555,12 @@ function onClick(e) {
     renderModal();
     return;
   }
+  if (id === "rchildren") {
+    readRuleDraft();
+    modal.draft.children = modal.draft.children === false;
+    renderModal();
+    return;
+  }
   if (id === "renabled") {
     readRuleDraft();
     modal.draft.enabled = modal.draft.enabled === false;
@@ -1640,12 +1737,10 @@ function bootChrome() {
       if (box) box.outerHTML = socksPreviewHTML(modal.draft);
     }
     if (e.target.id === "log-filter") { logFilter = e.target.value; fillLog(); }
-    if (e.target.id === "r-find" && modal) {
-      modal.q = e.target.value;
+    if ((e.target.id === "r-find" || e.target.id === "r-proc") && modal && modal.kind === "rule") {
+      if (e.target.id === "r-find") modal.q = e.target.value;
       readRuleDraft();
-      renderModal();
-      const again = document.getElementById("r-find");
-      if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+      refreshPicker();
     }
   });
   // Text and select settings save when the user finishes editing, not on

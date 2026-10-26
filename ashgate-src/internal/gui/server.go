@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"ashgate/internal/config"
+	"ashgate/internal/killswitch"
 	"ashgate/internal/logbuf"
 	"ashgate/internal/probe"
 	"ashgate/internal/process"
@@ -34,6 +35,10 @@ type hooks struct {
 	browse       func() (string, error)
 	autostart    func() (bool, error)
 	setAutostart func(on bool) error
+	// firewall and guard implement the kill switch; nil disables its
+	// firewall part (the engine still never sends proxied apps direct).
+	firewall *killswitch.Firewall
+	guard    func(state string) (stop func(), err error)
 }
 
 type controller struct {
@@ -55,6 +60,14 @@ type controller struct {
 	token string
 	// startMu keeps two Start clicks from opening two capture sessions.
 	startMu sync.Mutex
+
+	// Kill switch: ksMu serialises firewall changes; stopping is set while
+	// a Stop is in progress so a sync does not lift the block early.
+	ksMu      sync.Mutex
+	stopping  bool
+	guardStop func()
+	ksMissing []string
+	ksErr     string
 }
 
 // tokenHeader carries controller.token on every API request.
@@ -79,6 +92,12 @@ func newController(path string, cfg *config.Config, logs *logbuf.Buffer, h hooks
 		token: newToken(),
 	}
 	_ = c.syncBridges(cfg)
+	if h.firewall != nil {
+		if c.hooks.guard == nil {
+			c.hooks.guard = func(string) (func(), error) { return nil, killswitch.ErrUnsupported }
+		}
+		go c.ksLoop()
+	}
 	return c
 }
 
@@ -241,6 +260,16 @@ func (c *controller) api(w http.ResponseWriter, r *http.Request) {
 			apps = []process.App{}
 		}
 		writeJSON(w, http.StatusOK, apps)
+	case "/api/installed":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		apps := process.InstalledApps()
+		if apps == nil {
+			apps = []process.Installed{}
+		}
+		writeJSON(w, http.StatusOK, apps)
 	case "/api/reveal":
 		c.post(w, r, func() (any, error) {
 			return nil, revealConfigDir(c.path)
@@ -315,6 +344,7 @@ type stateView struct {
 	Config     *config.Config          `json:"config"`
 	Checks     map[string]probe.Report `json:"checks"`
 	Bridges    map[string]vless.Status `json:"bridges"`
+	KillSwitch ksView                  `json:"killSwitch"`
 	Events     []eventView             `json:"events"`
 	EventsSame bool                    `json:"eventsSame,omitempty"`
 	Generation uint64                  `json:"generation"`
@@ -331,6 +361,7 @@ type eventView struct {
 	BytesUp   int64  `json:"bytesUp"`
 	BytesDown int64  `json:"bytesDown"`
 	Error     string `json:"error,omitempty"`
+	Parent    string `json:"parent,omitempty"`
 }
 
 func (c *controller) snapshot() stateView {
@@ -395,6 +426,7 @@ func (c *controller) snapshotSince(since uint64) stateView {
 		Config:     cfg,
 		Checks:     checks,
 		Bridges:    bridges,
+		KillSwitch: c.ksSnapshot(cfg.KillSwitch),
 		Events:     events,
 		EventsSame: same,
 		Generation: g,
@@ -458,7 +490,11 @@ func (c *controller) start() error {
 			}
 		}
 		c.mu.Unlock()
+		// Capture ended, by Stop or by a failure: block proxied apps.
+		c.syncKill()
 	}()
+	// Capture is up, so the firewall block can be lifted.
+	go c.syncKill()
 	return nil
 }
 
@@ -469,6 +505,17 @@ func (c *controller) stop() error {
 	if sess == nil {
 		return nil
 	}
+	// Block before capture stops, so there is no moment when proxied
+	// applications could connect directly.
+	c.mu.Lock()
+	c.stopping = true
+	c.mu.Unlock()
+	c.syncKill()
+	defer func() {
+		c.mu.Lock()
+		c.stopping = false
+		c.mu.Unlock()
+	}()
 	sess.Stop()
 	select {
 	case <-sess.Done():
@@ -502,6 +549,7 @@ func (c *controller) replace(next *config.Config) error {
 	running := sess != nil && sess.Running()
 	c.mu.Unlock()
 	syncErr := c.syncBridges(cp)
+	go c.syncKill()
 	if running {
 		if err := sess.Apply(cp); err != nil && syncErr == nil {
 			syncErr = err
@@ -634,6 +682,7 @@ func eventViews(logs *logbuf.Buffer) []eventView {
 			BytesUp:   e.BytesUp,
 			BytesDown: e.BytesDown,
 			Error:     e.Error,
+			Parent:    e.Parent,
 		})
 	}
 	return out

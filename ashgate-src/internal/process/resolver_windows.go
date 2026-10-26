@@ -18,54 +18,47 @@ var (
 )
 
 func configure(r *Resolver) {
-	r.image = queryImage
+	t := &handleTable{m: map[uint32]windows.Handle{}}
+	r.image = t.query
+	r.exited = t.exited
+	r.release = t.closeAll
 	r.loadHelper = loadTables
-	r.exited = processExited
 }
 
-// held keeps one open handle per cached PID. While a handle is open Windows
-// cannot hand that PID to a new process, and WaitForSingleObject on it tells
-// when the cached process has exited.
-var held = struct {
-	sync.Mutex
-	m map[uint32]windows.Handle
-}{m: map[uint32]windows.Handle{}}
+// handleTable keeps one open handle per PID a resolver has cached. While a
+// handle is open Windows cannot hand that PID to a new process, and
+// WaitForSingleObject on it tells when the cached process has exited.
+// Each resolver owns its table and closes it when capture stops.
+type handleTable struct {
+	mu sync.Mutex
+	m  map[uint32]windows.Handle
+}
 
-func queryImage(pid uint32) rules.Process {
+func (t *handleTable) query(pid uint32) rules.Process {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
-	keep := err == nil
 	if err != nil {
-		h, err = windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-		if err != nil {
-			return rules.Process{PID: pid}
-		}
+		return queryImage(pid)
 	}
-	buf := make([]uint16, 32768)
-	n := uint32(len(buf))
-	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &n); err != nil {
+	p := readImage(h, pid)
+	if p.Path == "" {
 		windows.CloseHandle(h)
-		return rules.Process{PID: pid}
+		return p
 	}
-	path := windows.UTF16ToString(buf[:n])
-	if keep {
-		held.Lock()
-		if old, ok := held.m[pid]; ok {
-			windows.CloseHandle(old)
-		}
-		held.m[pid] = h
-		held.Unlock()
-	} else {
-		windows.CloseHandle(h)
+	t.mu.Lock()
+	if old, ok := t.m[pid]; ok {
+		windows.CloseHandle(old)
 	}
-	return rules.Process{PID: pid, Name: rules.Base(path), Path: path}
+	t.m[pid] = h
+	t.mu.Unlock()
+	return p
 }
 
-// processExited reports whether the process cached for pid is gone. Without a
+// exited reports whether the process cached for pid is gone. Without a
 // held handle it cannot tell, so it reports true and the name is re-read.
-func processExited(pid uint32) bool {
-	held.Lock()
-	defer held.Unlock()
-	h, ok := held.m[pid]
+func (t *handleTable) exited(pid uint32) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	h, ok := t.m[pid]
 	if !ok {
 		return true
 	}
@@ -74,8 +67,48 @@ func processExited(pid uint32) bool {
 		return false
 	}
 	windows.CloseHandle(h)
-	delete(held.m, pid)
+	delete(t.m, pid)
 	return true
+}
+
+func (t *handleTable) closeAll() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for pid, h := range t.m {
+		windows.CloseHandle(h)
+		delete(t.m, pid)
+	}
+}
+
+// queryImage reads a process without keeping a handle. List and TCPOwner
+// use it; only resolvers hold handles.
+func queryImage(pid uint32) rules.Process {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return rules.Process{PID: pid}
+	}
+	defer windows.CloseHandle(h)
+	return readImage(h, pid)
+}
+
+// readImage returns the image path, parent PID and creation time.
+func readImage(h windows.Handle, pid uint32) rules.Process {
+	buf := make([]uint16, 32768)
+	n := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &n); err != nil {
+		return rules.Process{PID: pid}
+	}
+	path := windows.UTF16ToString(buf[:n])
+	p := rules.Process{PID: pid, Name: rules.Base(path), Path: path}
+	var pbi windows.PROCESS_BASIC_INFORMATION
+	if windows.NtQueryInformationProcess(h, windows.ProcessBasicInformation, unsafe.Pointer(&pbi), uint32(unsafe.Sizeof(pbi)), nil) == nil {
+		p.PPID = uint32(pbi.InheritedFromUniqueProcessId)
+	}
+	var created, exit, kernel, user windows.Filetime
+	if windows.GetProcessTimes(h, &created, &exit, &kernel, &user) == nil {
+		p.Started = created.Nanoseconds()
+	}
+	return p
 }
 
 func loadTables() ([]Endpoint, error) {

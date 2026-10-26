@@ -63,3 +63,31 @@ func TestBareNameMatchesExe(t *testing.T) {
 		t.Fatalf("matched another program: %+v", d)
 	}
 }
+
+func TestChildInheritsParentRule(t *testing.T) {
+	off := false
+	s := Compile([]config.Rule{
+		{Process: "code.exe", Action: "proxy", Proxy: "v"},
+		{Process: "git.exe", Action: "direct"},
+		{Process: "steam.exe", Action: "proxy", Proxy: "v", Children: &off},
+		{Process: "explorer.exe", Action: "proxy", Proxy: "v"},
+	})
+	code := Process{PID: 10, Name: "code.exe"}
+	explorer := Process{PID: 2, Name: "explorer.exe"}
+	node := Process{PID: 11, Name: "node.exe", Parents: []Process{{PID: 12, Name: "electron-helper.exe"}, code, explorer}}
+	if d := s.Match(node); d.Action != "proxy" || d.Parent != "code.exe" {
+		t.Fatalf("grandchild did not inherit: %+v", d)
+	}
+	git := Process{Name: "git.exe", Parents: []Process{code}}
+	if d := s.Match(git); d.Action != "direct" || d.Parent != "" {
+		t.Fatalf("own rule must win: %+v", d)
+	}
+	game := Process{Name: "game.exe", Parents: []Process{{Name: "steam.exe"}}}
+	if d := s.Match(game); d.Action != "" {
+		t.Fatalf("children switched off: %+v", d)
+	}
+	desktop := Process{Name: "notepad.exe", Parents: []Process{explorer}}
+	if d := s.Match(desktop); d.Action != "" {
+		t.Fatalf("rule spread through explorer: %+v", d)
+	}
+}

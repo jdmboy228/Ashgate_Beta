@@ -18,6 +18,7 @@ import (
 
 	"ashgate/internal/autostart"
 	"ashgate/internal/config"
+	"ashgate/internal/killswitch"
 	"ashgate/internal/logbuf"
 	"ashgate/internal/service"
 	"github.com/jchv/go-webview2"
@@ -84,6 +85,8 @@ func Run(configPath string, startCapture bool) error {
 		browse:       h.browse,
 		autostart:    autostart.Enabled,
 		setAutostart: h.setAutostart,
+		firewall:     killswitch.New(killswitch.StatePath(configPath)),
+		guard:        killswitch.StartGuard,
 	})
 	h.ctrl.setNotice(notice)
 	if logErr != nil {

@@ -28,6 +28,8 @@ type Event struct {
 	BytesUp   int64     `json:"bytesUp"`
 	BytesDown int64     `json:"bytesDown"`
 	Error     string    `json:"error,omitempty"`
+	// Parent is the application whose rule a child process inherited.
+	Parent string `json:"parent,omitempty"`
 }
 
 // Buffer keeps the newest events and optionally mirrors them to a JSON-lines file.

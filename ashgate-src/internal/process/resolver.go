@@ -17,6 +17,8 @@ const (
 	// maxImages caps the PID cache when the platform cannot tell whether a
 	// process has exited.
 	maxImages = 4096
+	// maxParents bounds the ancestor chain.
+	maxParents = 8
 )
 
 type exactKey struct {
@@ -52,6 +54,15 @@ type Resolver struct {
 	// Windows reuses PIDs, so a cached name must be checked before reuse.
 	// Nil means the platform cannot tell; the cache is then only size-capped.
 	exited func(pid uint32) bool
+	// release frees platform resources, such as held process handles.
+	release func()
+}
+
+// Close releases process handles held for the PID cache.
+func (r *Resolver) Close() {
+	if r != nil && r.release != nil {
+		r.release()
+	}
 }
 
 // New returns an empty resolver. On Windows it also queries IP Helper.
@@ -234,6 +245,13 @@ func (r *Resolver) storeHelper(rows []Endpoint, now time.Time) {
 }
 
 func (r *Resolver) resolve(pid uint32) rules.Process {
+	return r.resolveAt(pid, 0)
+}
+
+// resolveAt resolves pid and, below maxParents, its ancestor chain. The
+// chain is computed once, when the PID is first cached: a parent never
+// changes, and it may exit later.
+func (r *Resolver) resolveAt(pid uint32, depth int) rules.Process {
 	r.mu.Lock()
 	p, ok := r.images[pid]
 	r.mu.Unlock()
@@ -243,7 +261,7 @@ func (r *Resolver) resolve(pid uint32) rules.Process {
 		}
 		// The process is gone and the PID may now belong to another one.
 		r.mu.Lock()
-		if cur, ok := r.images[pid]; ok && cur == p {
+		if cur, ok := r.images[pid]; ok && cur.Started == p.Started && cur.Path == p.Path {
 			delete(r.images, pid)
 		}
 		r.mu.Unlock()
@@ -259,10 +277,40 @@ func (r *Resolver) resolve(pid uint32) rules.Process {
 	if got.Name == "" && got.Path == "" {
 		return got
 	}
+	if depth < maxParents {
+		got.Parents = r.parents(got, depth)
+	}
 	r.mu.Lock()
 	r.images[pid] = got
 	r.mu.Unlock()
 	return got
+}
+
+// parents returns child's ancestors, nearest first. A parent that started
+// after the child holds a reused PID and ends the chain, as does one that
+// has exited or cannot be opened.
+func (r *Resolver) parents(child rules.Process, depth int) []rules.Process {
+	if child.PPID == 0 || child.PPID == child.PID {
+		return nil
+	}
+	par := r.resolveAt(child.PPID, depth+1)
+	if par.Name == "" && par.Path == "" {
+		return nil
+	}
+	if par.Started != 0 && child.Started != 0 && par.Started > child.Started {
+		return nil
+	}
+	out := make([]rules.Process, 0, 1+len(par.Parents))
+	flat := par
+	flat.Parents = nil
+	out = append(out, flat)
+	for _, a := range par.Parents {
+		if len(out) >= maxParents || a.PID == child.PID {
+			break
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func alive(e entry, now time.Time) bool {

@@ -15,15 +15,19 @@ import (
 
 // Config is the on-disk configuration.
 type Config struct {
-	Version        int     `json:"version"`
-	Relay          Relay   `json:"relay"`
-	DNS            DNS     `json:"dns"`
-	BypassPrivate  bool    `json:"bypassPrivate"`
-	UDPUnsupported string  `json:"udpUnsupported"`
-	Log            Log     `json:"log"`
-	UI             UI      `json:"ui,omitempty"`
-	Proxies        []Proxy `json:"proxies"`
-	Rules          []Rule  `json:"rules"`
+	Version        int    `json:"version"`
+	Relay          Relay  `json:"relay"`
+	DNS            DNS    `json:"dns"`
+	BypassPrivate  bool   `json:"bypassPrivate"`
+	UDPUnsupported string `json:"udpUnsupported"`
+	// KillSwitch keeps proxied applications off the direct network: while
+	// capture runs nothing of theirs bypasses the proxy, and while it is
+	// stopped Windows Firewall blocks them.
+	KillSwitch bool    `json:"killSwitch,omitempty"`
+	Log        Log     `json:"log"`
+	UI         UI      `json:"ui,omitempty"`
+	Proxies    []Proxy `json:"proxies"`
+	Rules      []Rule  `json:"rules"`
 	// Extra keeps JSON keys this version does not understand, such as the
 	// Dolphin block from 0.4.x. Saving the file must not drop them.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -81,11 +85,19 @@ type Rule struct {
 	Process string `json:"process"`
 	Action  string `json:"action"`
 	Proxy   string `json:"proxy,omitempty"`
+	// Children, when not false, applies the rule to processes the
+	// application starts, at any depth. A missing flag means true.
+	Children *bool `json:"children,omitempty"`
 }
 
 // IsEnabled reports whether the rule is active. A missing flag means enabled.
 func (r Rule) IsEnabled() bool {
 	return r.Enabled == nil || *r.Enabled
+}
+
+// CoversChildren reports whether child processes inherit the rule.
+func (r Rule) CoversChildren() bool {
+	return r.Children == nil || *r.Children
 }
 
 // Default returns a config with the built-in defaults and no rules.
@@ -301,7 +313,7 @@ func (c *Config) ProxyByName(name string) (Proxy, bool) {
 // verbatim so a newer or older file can round-trip.
 var knownConfigKeys = map[string]bool{
 	"version": true, "relay": true, "dns": true, "bypassPrivate": true,
-	"udpUnsupported": true, "log": true, "ui": true, "proxies": true, "rules": true,
+	"udpUnsupported": true, "killSwitch": true, "log": true, "ui": true, "proxies": true, "rules": true,
 }
 
 // Load reads a config file, applies defaults, and validates it.

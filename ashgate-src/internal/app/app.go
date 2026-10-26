@@ -13,6 +13,7 @@ import (
 
 	"ashgate/internal/config"
 	"ashgate/internal/gui"
+	"ashgate/internal/killswitch"
 	"ashgate/internal/logbuf"
 	"ashgate/internal/runtime"
 	"ashgate/internal/service"
@@ -69,6 +70,12 @@ func dispatch(args []string) int {
 	case "check":
 		prepareConsole()
 		return cmdCheck(rest)
+	case killswitch.GuardCommand:
+		// Started by the window while capture runs; see killswitch.StartGuard.
+		if err := killswitch.RunGuard(rest); err != nil {
+			return 1
+		}
+		return 0
 	case "run":
 		prepareConsole()
 		if stop, code := ensureElevated(args); stop {

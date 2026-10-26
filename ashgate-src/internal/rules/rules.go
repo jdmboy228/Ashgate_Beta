@@ -12,6 +12,13 @@ type Process struct {
 	PID  uint32
 	Name string
 	Path string
+	// PPID and Started (creation time, Unix nanoseconds) identify the
+	// parent. Zero means unknown.
+	PPID    uint32
+	Started int64
+	// Parents is the ancestor chain, nearest first. Each element has no
+	// Parents of its own.
+	Parents []Process
 }
 
 // Decision is the first matching rule, or Action == "" when nothing matched.
@@ -19,6 +26,9 @@ type Decision struct {
 	Action    string
 	Proxy     string
 	RuleIndex int
+	// Parent names the ancestor whose rule was inherited; empty when the
+	// process matched a rule itself.
+	Parent string
 }
 
 // Set is an immutable list of enabled rules in config order.
@@ -27,11 +37,12 @@ type Set struct {
 }
 
 type compiled struct {
-	path   bool
-	match  string
-	action string
-	proxy  string
-	index  int
+	path     bool
+	match    string
+	action   string
+	proxy    string
+	index    int
+	children bool
 }
 
 // Compile keeps enabled rules in order. Disabled rules are skipped.
@@ -43,7 +54,7 @@ func Compile(rules []config.Rule) *Set {
 		}
 		raw := strings.TrimSpace(r.Process)
 		raw = strings.Trim(raw, `"`)
-		c := compiled{action: r.Action, proxy: r.Proxy, index: i}
+		c := compiled{action: r.Action, proxy: r.Proxy, index: i, children: r.CoversChildren()}
 		if IsPath(raw) {
 			c.path = true
 			c.match = NormalizePath(raw)
@@ -59,11 +70,35 @@ func Compile(rules []config.Rule) *Set {
 	return out
 }
 
-// Match returns the first matching enabled rule.
+// Match returns the first enabled rule for p. When no rule names p itself,
+// the nearest ancestor whose first matching rule covers children decides,
+// so helpers an application starts (updaters, Electron and browser helpers,
+// games started by a launcher) follow the application's rule. The climb
+// stops at shell and system processes; otherwise a rule could spread to
+// everything started from the desktop.
 func (s *Set) Match(p Process) Decision {
 	if s == nil {
 		return Decision{RuleIndex: -1}
 	}
+	if r, ok := s.first(p); ok {
+		return Decision{Action: r.action, Proxy: r.proxy, RuleIndex: r.index}
+	}
+	for _, a := range p.Parents {
+		if IsShellOrSystem(a) {
+			break
+		}
+		if r, ok := s.first(a); ok && r.children {
+			parent := Base(a.Name)
+			if parent == "" {
+				parent = Base(a.Path)
+			}
+			return Decision{Action: r.action, Proxy: r.proxy, RuleIndex: r.index, Parent: parent}
+		}
+	}
+	return Decision{RuleIndex: -1}
+}
+
+func (s *Set) first(p Process) (compiled, bool) {
 	name := NormalizeName(p.Name)
 	if name == "" {
 		name = Base(p.Path)
@@ -72,15 +107,35 @@ func (s *Set) Match(p Process) Decision {
 	for _, r := range s.rules {
 		if r.path {
 			if path != "" && path == r.match {
-				return Decision{Action: r.action, Proxy: r.proxy, RuleIndex: r.index}
+				return r, true
 			}
 			continue
 		}
 		if name != "" && name == r.match {
-			return Decision{Action: r.action, Proxy: r.proxy, RuleIndex: r.index}
+			return r, true
 		}
 	}
-	return Decision{RuleIndex: -1}
+	return compiled{}, false
+}
+
+// shellOrSystem are processes that start unrelated programs. Rules are
+// never inherited through them.
+var shellOrSystem = map[string]bool{
+	"explorer.exe": true, "svchost.exe": true, "services.exe": true, "wininit.exe": true,
+	"winlogon.exe": true, "userinit.exe": true, "smss.exe": true, "csrss.exe": true,
+	"lsass.exe": true, "system": true, "sihost.exe": true, "taskhostw.exe": true,
+	"runtimebroker.exe": true, "dllhost.exe": true, "wmiprvse.exe": true, "taskeng.exe": true,
+	"startmenuexperiencehost.exe": true, "shellexperiencehost.exe": true,
+	"searchhost.exe": true, "applicationframehost.exe": true, "ashgate.exe": true,
+}
+
+// IsShellOrSystem reports a process whose children must not inherit rules.
+func IsShellOrSystem(p Process) bool {
+	name := Base(p.Name)
+	if name == "" {
+		name = Base(p.Path)
+	}
+	return shellOrSystem[name]
 }
 
 // IsPath reports whether the rule field is a filesystem path rather than a bare exe name.

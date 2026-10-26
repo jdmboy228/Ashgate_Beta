@@ -29,6 +29,7 @@ type udpFlow struct {
 	down   atomic.Int64
 	live   bool
 	closed bool
+	parent string
 	sess   dialer.Session
 	// failedAt is the last failed DialUDP. While the proxy is down, packets
 	// within udpRetry of it are dropped instead of each starting a new
@@ -174,6 +175,7 @@ func (e *Engine) retireUDP(flow *udpFlow) {
 		Status:    "closed",
 		BytesUp:   flow.up.Load(),
 		BytesDown: flow.down.Load(),
+		Parent:    flow.parent,
 	})
 }
 
@@ -207,6 +209,7 @@ func (e *Engine) sweep(now time.Time) {
 		e.directUDP.rotate()
 		e.blockTCP.rotate()
 		e.blockUDP.rotate()
+		e.fragDrop.rotate()
 	}
 	var staleTCP []*tcpFlow
 	for _, f := range e.byClient {
