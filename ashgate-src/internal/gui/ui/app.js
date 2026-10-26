@@ -148,8 +148,8 @@ function demoState() {
   const on = true;
   const off = false;
   return {
-    version: "0.7.1",
-    build: { version: "0.7.1", commit: "912208e", time: "2026-10-26T18:40:00Z" },
+    version: "0.7.2",
+    build: { version: "0.7.2", commit: "912208e", time: "2026-10-26T18:40:00Z" },
     path: "C:\\ProgramData\\Ashgate\\config.json",
     running: true,
     active: 12,

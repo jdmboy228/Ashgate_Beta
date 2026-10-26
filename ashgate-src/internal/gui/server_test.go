@@ -1,18 +1,21 @@
 package gui
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ashgate/internal/config"
 	"ashgate/internal/killswitch"
 	"ashgate/internal/logbuf"
 	"ashgate/internal/probe"
 	"ashgate/internal/process"
+	rt "ashgate/internal/runtime"
 	"ashgate/internal/vless"
 )
 
@@ -231,5 +234,43 @@ func TestUIOnlySaveSkipsEngine(t *testing.T) {
 	b.KillSwitch = true
 	if engineView(a) == engineView(b) {
 		t.Fatal("kill switch change ignored")
+	}
+}
+
+// TestStartDoesNotDeadlock guards against 0.7.1's freeze: start held the
+// controller lock while lifting the kill-switch block, which takes it too.
+func TestStartDoesNotDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	fw := killswitch.NewWithRunner(filepath.Join(dir, "killswitch.json"), func(string) error { return nil })
+	c := newController(filepath.Join(dir, "config.json"), config.Default(), nil, hooks{
+		firewall: fw,
+		guard:    func(string) (func(), error) { return func() {}, nil },
+	})
+	c.startSession = func(context.Context, *config.Config, *logbuf.Buffer, *vless.Manager) (*rt.Session, error) {
+		return &rt.Session{}, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.start() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("start did not return: controller deadlocked")
+	}
+	snap := make(chan struct{})
+	go func() { c.snapshot(); close(snap) }()
+	select {
+	case <-snap:
+	case <-time.After(3 * time.Second):
+		t.Fatal("state request hangs after start")
+	}
+	stopped := make(chan struct{})
+	go func() { _ = c.stop(); _ = c.replace(config.Default()); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop or save hangs after start")
 	}
 }

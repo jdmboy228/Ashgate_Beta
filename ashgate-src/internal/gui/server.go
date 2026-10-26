@@ -62,6 +62,9 @@ type controller struct {
 	// token authenticates API calls. Only the WebView window knows it, so
 	// web pages and other local programs cannot drive this elevated process.
 	token string
+	// startSession starts capture; tests replace it. Nil means
+	// runtime.StartWith.
+	startSession func(context.Context, *config.Config, *logbuf.Buffer, *vless.Manager) (*rt.Session, error)
 	// autoBusy is set while a background autostart read runs.
 	autoBusy bool
 	// startMu keeps two Start clicks from opening two capture sessions.
@@ -514,15 +517,22 @@ func (c *controller) start() error {
 	cfg := cloneCfg(c.cfg)
 	logs := c.logs
 	c.mu.Unlock()
-	sess, err := rt.StartWith(context.Background(), cfg, logs, c.bridges)
+	startSession := c.startSession
+	if startSession == nil {
+		startSession = rt.StartWith
+	}
+	sess, err := startSession(context.Background(), cfg, logs, c.bridges)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err != nil {
 		c.errText = err.Error()
+		c.mu.Unlock()
 		return err
 	}
 	c.sess = sess
 	c.errText = ""
+	// Unlock before anything below takes c.mu again: sync.Mutex is not
+	// reentrant, and holding it here froze the window on Start (0.7.1).
+	c.mu.Unlock()
 	go func() {
 		<-sess.Done()
 		c.mu.Lock()
