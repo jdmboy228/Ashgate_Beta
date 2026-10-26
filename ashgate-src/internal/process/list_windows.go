@@ -19,6 +19,7 @@ type App struct {
 	Name   string `json:"name"`
 	Path   string `json:"path"`
 	Window bool   `json:"window"`
+	Title  string `json:"title,omitempty"` // main window caption
 }
 
 var (
@@ -26,6 +27,7 @@ var (
 	procGetWindow     = user32.NewProc("GetWindow")
 	procGetWindowLen  = user32.NewProc("GetWindowTextLengthW")
 	procGetWindowLong = user32.NewProc("GetWindowLongPtrW")
+	procGetWindowText = user32.NewProc("GetWindowTextW")
 )
 
 const (
@@ -71,19 +73,19 @@ func List() ([]App, error) {
 		if img.Path == "" || strings.EqualFold(img.Name, "ashgate.exe") {
 			continue
 		}
-		win := windowed[pid]
+		title, win := windowed[pid]
 		low := strings.ToLower(img.Path)
 		if !win && (strings.HasPrefix(low, sysDir) || looksBackground(img.Name)) {
 			continue
 		}
 		if i, ok := byPath[low]; ok {
 			if win && !out[i].Window {
-				out[i].Window, out[i].PID = true, pid
+				out[i].Window, out[i].PID, out[i].Title = true, pid, title
 			}
 			continue
 		}
 		byPath[low] = len(out)
-		out = append(out, App{PID: pid, Name: img.Name, Path: img.Path, Window: win})
+		out = append(out, App{PID: pid, Name: img.Name, Path: img.Path, Window: win, Title: title})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Window != out[j].Window {
@@ -108,12 +110,13 @@ var (
 	enumOnce sync.Once
 	enumCB   uintptr
 	enumMu   sync.Mutex
-	enumOut  map[uint32]bool
+	enumOut  map[uint32]string
 )
 
 // windowPIDs returns the PIDs that own a visible, titled, unowned top-level
-// window that is not a tool window: what the taskbar shows.
-func windowPIDs() map[uint32]bool {
+// window that is not a tool window (what the taskbar shows), with the
+// caption of the first such window.
+func windowPIDs() map[uint32]string {
 	enumOnce.Do(func() {
 		enumCB = windows.NewCallback(func(hwnd windows.HWND, _ uintptr) uintptr {
 			if !windows.IsWindowVisible(hwnd) {
@@ -122,7 +125,8 @@ func windowPIDs() map[uint32]bool {
 			if owner, _, _ := procGetWindow.Call(uintptr(hwnd), gwOwner); owner != 0 {
 				return 1
 			}
-			if n, _, _ := procGetWindowLen.Call(uintptr(hwnd)); n == 0 {
+			n, _, _ := procGetWindowLen.Call(uintptr(hwnd))
+			if n == 0 {
 				return 1
 			}
 			if ex, _, _ := procGetWindowLong.Call(uintptr(hwnd), gwlExStyle); ex&wsExToolWindow != 0 {
@@ -130,14 +134,18 @@ func windowPIDs() map[uint32]bool {
 			}
 			var pid uint32
 			if _, err := windows.GetWindowThreadProcessId(hwnd, &pid); err == nil && pid != 0 {
-				enumOut[pid] = true
+				if _, seen := enumOut[pid]; !seen {
+					buf := make([]uint16, n+1)
+					procGetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+					enumOut[pid] = windows.UTF16ToString(buf)
+				}
 			}
 			return 1
 		})
 	})
 	enumMu.Lock()
 	defer enumMu.Unlock()
-	enumOut = map[uint32]bool{}
+	enumOut = map[uint32]string{}
 	_ = windows.EnumWindows(enumCB, nil)
 	out := enumOut
 	enumOut = nil

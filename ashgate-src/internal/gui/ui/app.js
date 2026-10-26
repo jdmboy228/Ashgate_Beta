@@ -49,6 +49,16 @@ const ICONS = {
   socks: '<path d="M12 3a7 7 0 0 0-7 7c0 5 7 11 7 11s7-6 7-11a7 7 0 0 0-7-7z"/><circle cx="12" cy="10" r="2.2"/>',
   http: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   vless: '<path d="M13 3 5 14h6l-1 7 8-11h-6z"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  chev: '<path d="m6 9 6 6 6-6"/>',
+  chevr: '<path d="m9 6 6 6-6 6"/>',
+  up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="9" r="2"/><path d="M6 7v10M18 11c0 4-6 3-12 6"/>',
+  alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
+  checkbox: '<rect x="4" y="4" width="16" height="16" rx="4" fill="currentColor" stroke="none"/><path d="m8 12 3 3 5-6" stroke="var(--acc-tx)"/>',
+  square: '<rect x="4" y="4" width="16" height="16" rx="4"/>',
 };
 const NAV = [
   ["home", "Главная"],
@@ -137,8 +147,8 @@ function demoState() {
   const on = true;
   const off = false;
   return {
-    version: "0.6.0",
-    build: { version: "0.6.0", commit: "912208e", time: "2026-10-26T18:40:00Z" },
+    version: "0.7.0",
+    build: { version: "0.7.0", commit: "912208e", time: "2026-10-26T18:40:00Z" },
     path: "C:\\ProgramData\\Ashgate\\config.json",
     running: true,
     active: 12,
@@ -181,13 +191,23 @@ function demoState() {
         },
       ],
       rules: [
-        { enabled: on, process: "curl.exe", action: "proxy", proxy: "local" },
-        { enabled: on, process: "chrome.exe", action: "proxy", proxy: "work-http" },
-        { enabled: on, process: "C:\\Program Files\\Telegram Desktop\\Telegram.exe", action: "proxy", proxy: "local" },
-        { enabled: on, process: "steam.exe", action: "direct" },
+        { enabled: on, process: "*\\Discord\\app-*\\Discord.exe", action: "proxy", proxy: "aeza", group: "Связь и звонки" },
+        { enabled: on, process: "C:\\Users\\user\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe", action: "proxy", proxy: "aeza", group: "Связь и звонки", children: false },
+        { enabled: on, process: "Cursor.exe", action: "proxy", proxy: "aeza" },
+        { enabled: on, process: "Spotify.exe", action: "proxy", proxy: "backup", killSwitch: true },
+        { enabled: on, process: "curl.exe", action: "proxy", proxy: "local", tcpOnly: true },
         { enabled: on, process: "telemetry.exe", action: "block" },
-        { enabled: off, process: "firefox.exe", action: "proxy", proxy: "backup" },
+        { enabled: off, process: "chrome.exe", action: "proxy", proxy: "work-http" },
+        { enabled: off, process: "steam.exe", action: "direct" },
       ],
+      groups: [{ name: "Связь и звонки", enabled: on, action: "proxy", proxy: "aeza", collapsed: false }],
+    },
+    ruleStats: {
+      "*\\discord\\app-*\\discord.exe": { flows: 18, up: 9200000, down: 842000000, upRate: 122880, downRate: 2516582 },
+      "c:\\users\\user\\appdata\\roaming\\telegram desktop\\telegram.exe": { flows: 6, up: 31000000, down: 1150000000, upRate: 12288, downRate: 184320 },
+      "cursor.exe": { flows: 8, up: 4100000, down: 210000000, upRate: 34816, downRate: 430080 },
+      "spotify.exe": { flows: 0, up: 120000, down: 14200000, upRate: 0, downRate: 0, error: "SOCKS5: нет ответа от proxy.example.com:1080 (таймаут)" },
+      "curl.exe": { flows: 0, up: 800, down: 4100, upRate: 0, downRate: 0 },
     },
     events: [
       { time: "12:04:31", process: "curl.exe", pid: 9012, proto: "TCP", dest: "api.ipify.org:443", via: "local", status: "open", bytesUp: 800, bytesDown: 4100 },
@@ -223,6 +243,7 @@ function paintChrome() {
   const side = document.getElementById("side-card");
   if (!side) return;
   const sideName = running ? "Работает" : "Остановлен";
+  const powerLabel = running ? "Стоп" : "Запустить";
   const traffic = state ? bytes((state.bytesUp || 0) + (state.bytesDown || 0)) : "0 Б";
   const ksBlocked = state && state.killSwitch && state.killSwitch.on && (state.killSwitch.blocked || []).length;
   const sideSub = running ? (state.active || 0) + " потоков · " + traffic : (ksBlocked ? "kill switch: приложения без сети" : "перехват выключен");
@@ -230,7 +251,7 @@ function paintChrome() {
   // The Start/Stop button is rebuilt only when the state flips; the live
   // traffic line is updated in place so clicks on the button are not lost.
   setHTML(side, `<button class="side-meta" id="side-status" type="button" aria-label="${esc(sideName)}"><i class="dot"></i><span class="name">${sideName}</span><span class="sub"></span></button>
-    <button class="side-power${running ? " run" : ""}" id="side-power" type="button" aria-label="${running ? "Стоп" : "Старт"}">${icon("power", 16)}<span>${running ? "Стоп" : "Старт"}</span></button>`);
+    <button class="side-power${running ? " run" : ""}" id="side-power" type="button" aria-label="${powerLabel}">${icon("power", 16)}<span>${powerLabel}</span></button>`);
   setText(side.querySelector(".sub"), sideSub);
   const meta = side.querySelector(".side-meta");
   if (meta) meta.title = sideName + " · " + sideSub;
@@ -240,7 +261,7 @@ function paintChrome() {
 function pageHTML() {
   if (page === "home") return homeHTML();
   if (page === "proxies") return proxiesHTML();
-  if (page === "rules") return rulesHTML();
+  if (page === "rules") return appsHTML();
   if (page === "log") return logHTML();
   if (page === "settings") return settingsHTML();
   return "";
@@ -258,12 +279,6 @@ function proxiesHTML() {
   <div class="head-actions"><button class="btn secondary" data-act="probe-all" type="button">${icon("refresh")}Проверить все</button><button class="btn secondary" data-act="paste-vless" type="button">${icon("paste")}Вставить vless://</button><button class="btn pri" data-act="proxy-add" type="button">${icon("plus")}Добавить</button>${headMore()}</div></div>
   <div id="proxy-table" style="margin-top:16px"></div>
   <div class="note">${icon("info", 18)}<strong>VLESS для Dolphin{anty} и других антидетектов</strong><p>В профиле — SOCKS5 127.0.0.1 и порт моста (HTTP — порт + 1). Правило на dolphin.exe не нужно.</p></div>`;
-}
-function rulesHTML() {
-  return `<div class="head"><div><h1>Приложения</h1><p class="sub">Проверяются сверху вниз — срабатывает первое включённое совпадение.</p></div>
-  <div class="head-actions"><button class="btn pri" data-act="rule-add" type="button">${icon("plus")}Добавить</button>${headMore()}</div></div>
-  <div id="rule-table" style="margin-top:16px"></div>
-  <p class="hint">Перетащите строку за маркер слева, чтобы изменить порядок. Не указывайте svchost.exe — для системного DNS есть «Системный резолвер» в настройках.</p>`;
 }
 function logHTML() {
   const onlyOn = errorsOnly ? " on" : "";
@@ -347,7 +362,7 @@ function fillPage() {
   if (!state) return;
   if (page === "home") fillHome();
   if (page === "proxies") fillProxies();
-  if (page === "rules") fillRules();
+  if (page === "rules") fillApps();
   if (page === "log") fillLog();
 }
 
@@ -356,7 +371,9 @@ function fillHome() {
   if (!host) return;
   const rules = cfg().rules || [];
   const proxies = cfg().proxies || [];
-  const via = rules.filter((r) => r.enabled !== false && r.action === "proxy" && r.proxy);
+  // A grouped rule follows its group's switch and route.
+  const via = rules.filter((r) => { const e = apEffective(r); return e.enabled && e.action === "proxy" && e.proxy; })
+    .map((r) => ({ ...r, proxy: apEffective(r).proxy }));
   const errs = (state.events || []).filter((e) => e.status === "error");
   const checkKey = proxies.map((p) => {
     const c = state.checks && state.checks[p.name];
@@ -461,14 +478,6 @@ function fillProxies() {
   setHTML(host, `<table class="table tall"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`);
 }
 
-function ruleSub(rule) {
-  const process = String(rule.process || "");
-  const byPath = process.includes("\\") || process.includes("/") || /^[A-Za-z]:/.test(process);
-  const bits = [byPath ? "полный путь" : "по имени файла"];
-  if (rule.children !== false) bits.push("с дочерними");
-  if (rule.enabled === false) bits.push("выключено");
-  return bits.join(" · ");
-}
 function baseName(process) {
   const s = String(process).replace(/\//g, "\\");
   const i = s.lastIndexOf("\\");
@@ -480,61 +489,11 @@ function appLabel(process) {
 function appIconHTML(process, style) {
   const letter = esc((appLabel(process) || "?").slice(0, 1).toUpperCase());
   const path = String(process || "");
-  const isPath = /[\\/]/.test(path) || /^[A-Za-z]:/.test(path);
   const st = style ? ` style="${style}"` : "";
-  if (DEMO || !isPath) return `<span class="appicon"${st}>${letter}</span>`;
+  // Names and masks are resolved to an exe by the server; 404 keeps the letter.
+  if (DEMO || !path.trim()) return `<span class="appicon"${st}>${letter}</span>`;
   const src = "/api/icon?path=" + encodeURIComponent(path) + "&t=" + encodeURIComponent(TOKEN);
   return `<span class="appicon"${st}><img alt="" src="${esc(src)}" onload="this.parentNode.classList.add('hasimg')" onerror="this.remove()">${letter}</span>`;
-}
-
-function fillRules() {
-  const host = document.getElementById("rule-table");
-  if (!host || dragging) return;
-  const list = cfg().rules || [];
-  if (!list.length) {
-    setHTML(host, `<div class="table"><div class="empty-card"><h3>Приложений ещё нет</h3><p>Укажите exe или полный путь. Первое включённое совпадение сверху побеждает.</p><button class="btn pri" type="button" data-act="rule-add">${icon("plus")}Добавить приложение</button></div></div>`);
-    return;
-  }
-  const head = ["#", "", "Приложение", "Действие", "Через", ""];
-  const rows = list.map((r, i) => {
-    const off = r.enabled === false;
-    return `<tr class="${sel.rule === i ? "sel" : ""} ${off ? "dim" : ""}" draggable="false" data-i="${i}">
-      <td class="num"><button class="grip" type="button" data-grip="${i}" aria-label="Порядок">${icon("grip")}</button> ${i + 1}</td>
-      <td><button class="toggle${off ? "" : " on"}" type="button" data-act="rule-toggle" data-i="${i}" aria-pressed="${off ? "false" : "true"}"><i></i></button></td>
-      <td><div class="proc">${appIconHTML(r.process)}<span class="txt"><span class="nm">${esc(appLabel(r.process))}</span><span class="sub">${esc(ruleSub(r))}</span></span></div></td>
-      <td>${actionBadge(r.action)}</td>
-      <td class="${r.proxy ? "" : ""}">${esc(r.proxy || "—")}</td>
-      <td><button class="iconbtn" data-act="menu-rule" data-i="${i}" type="button" aria-label="Ещё">${icon("more")}</button></td>
-    </tr>`;
-  });
-  // Listeners belong to the rows; they are attached only when rows are new.
-  if (!setHTML(host, `<table class="table tall" id="rules"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`)) return;
-  host.querySelectorAll("[data-grip]").forEach((g) => {
-    const tr = g.closest("tr");
-    g.addEventListener("mousedown", () => { tr.draggable = true; });
-    tr.addEventListener("dragstart", (e) => {
-      dragging = true;
-      e.dataTransfer.setData("text/plain", tr.dataset.i);
-      e.dataTransfer.effectAllowed = "move";
-    });
-    tr.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      host.querySelectorAll(".drop-line").forEach((n) => n.classList.remove("drop-line"));
-      tr.classList.add("drop-line");
-    });
-    tr.addEventListener("drop", (e) => {
-      e.preventDefault();
-      const from = Number(e.dataTransfer.getData("text/plain"));
-      const to = Number(tr.dataset.i);
-      moveRule(from, to);
-    });
-    tr.addEventListener("dragend", () => {
-      dragging = false;
-      tr.draggable = false;
-      host.querySelectorAll(".drop-line").forEach((n) => n.classList.remove("drop-line"));
-      fillRules();
-    });
-  });
 }
 
 function eventKey(e) {
@@ -632,7 +591,7 @@ function renderModal() {
   const root = document.getElementById("modal");
   if (!modal) { root.innerHTML = ""; return; }
   if (modal.kind === "proxy") root.innerHTML = proxyDialog();
-  else if (modal.kind === "rule") root.innerHTML = ruleDialog();
+  else if (AP_MODALS[modal.kind]) root.innerHTML = AP_MODALS[modal.kind]();
   else if (modal.kind === "confirm" || modal.kind === "alert") root.innerHTML = confirmDialog();
 }
 function confirmDialog() {
@@ -820,32 +779,6 @@ function probeBadge(rep, type) {
   else text += rep.udp ? " · UDP есть" : "";
   return badge(text, "ok", true);
 }
-function ruleDialog() {
-  const r = modal.draft;
-  const names = (cfg().proxies || []).map((p) => p.name);
-  const act = r.action || "proxy";
-  return `<div class="scrim"><form class="dialog" id="dlg">
-    <h2>Приложение</h2><div class="dsub">${modal.index < 0 ? "Новое приложение" : "Изменение"}</div>
-    <div class="body">
-      <label class="lbl">Процесс</label>
-      <div class="proc-line"><div class="field"><input id="r-proc" value="${esc(r.process || "")}" placeholder="Название, например telegram" autocomplete="off" autofocus></div>
-      <button class="btn" type="button" data-act="browse">${icon("folder")}Обзор…</button></div>
-      <div class="help">Начните вводить название — путь к exe найдётся сам. Можно указать имя файла (curl.exe) или полный путь.</div>
-      <div class="picker"><div class="field search" style="margin:8px">${icon("search")}<input id="r-find" placeholder="Поиск среди запущенных и установленных" value="${esc(modal.q || "")}" autocomplete="off"></div>
-      <div id="r-picks">${pickerHTML()}</div></div>
-      <div style="height:14px"></div><label class="lbl">Действие</label>
-      <div class="seg">${[["proxy", "прокси"], ["direct", "напрямую"], ["block", "блокировать"]].map(([v, l]) => `<button type="button" data-act="raction" data-value="${v}" class="${act === v ? "on" : ""}">${l}</button>`).join("")}</div>
-      <div class="rule-extra">
-        <div class="rule-proxy"><label class="lbl">Прокси</label><select id="r-proxy" ${act === "proxy" ? "" : "disabled"}>${names.map((n) => `<option value="${esc(n)}" ${n === r.proxy ? "selected" : ""}>${esc(n)}</option>`).join("") || `<option value="">нет прокси</option>`}</select></div>
-        <div class="rule-enabled"><label class="lbl">Включено</label><div class="line"><button class="toggle${r.enabled === false ? "" : " on"}" type="button" data-act="renabled" aria-pressed="${r.enabled === false ? "false" : "true"}"><i></i></button><span>${r.enabled === false ? "Выкл" : "Вкл"}</span></div></div>
-      </div>
-      <div class="rule-children"><button class="toggle${r.children === false ? "" : " on"}" type="button" data-act="rchildren" aria-pressed="${r.children === false ? "false" : "true"}"><i></i></button><div><div class="t">Включая дочерние процессы</div><div class="help">Всё, что запускает это приложение (помощники, обновления, игры из лаунчера), идёт по этому же правилу. Своё правило у дочернего процесса важнее.</div></div></div>
-    </div>
-    <div class="footer"><button class="btn pri" type="submit">${modal.index < 0 ? "Добавить" : "Сохранить"}</button><button class="btn" type="button" data-act="cancel">Отмена</button></div>
-  </form></div>`;
-}
-
-// pickMatch scores how well an app matches the query; 0 means no match.
 function pickMatch(q, name, path) {
   if (!q) return 1;
   const n = String(name || "").toLowerCase();
@@ -853,41 +786,6 @@ function pickMatch(q, name, path) {
   if (n.startsWith(q) || exe.startsWith(q)) return 3;
   if (n.includes(q) || exe.includes(q)) return 2;
   return String(path || "").toLowerCase().includes(q) ? 1 : 0;
-}
-function pickerQuery() {
-  const q = (modal.q || "").trim();
-  if (q) return q.toLowerCase();
-  // The Process field doubles as the search while it holds a name, not a path.
-  const proc = String(modal.draft.process || "").trim();
-  return /[\\/]/.test(proc) || /^[A-Za-z]:/.test(proc) ? "" : proc.replace(/\.exe$/i, "").toLowerCase();
-}
-function pickerHTML() {
-  const r = modal.draft;
-  const q = pickerQuery();
-  const cur = String(r.process || "").toLowerCase();
-  const rank = (list, f) => list.map((a) => [pickMatch(q, f(a), a.path), a]).filter((x) => x[0] > 0)
-    .sort((x, y) => y[0] - x[0]).map((x) => x[1]);
-  const running = rank(modal.apps || [], (a) => a.name).slice(0, q ? 5 : 8);
-  const seen = new Set((modal.apps || []).map((a) => String(a.path || "").toLowerCase()));
-  const installed = q ? rank((modal.installed || []).filter((a) => !seen.has(String(a.path).toLowerCase())), (a) => a.name).slice(0, 6) : [];
-  const row = (name, path, side) => {
-    const choice = chosenProcess(baseName(path) || name, path);
-    const on = cur && (cur === choice.toLowerCase() || cur === String(path || "").toLowerCase());
-    return `<button class="pick${on ? " on" : ""}" type="button" data-act="pick" data-name="${esc(baseName(path) || name)}" data-path="${esc(path || "")}">${appIconHTML(path || name, "width:22px;height:22px;border-radius:5px;font-size:11px")}<span class="name">${esc(name)}</span><span class="pid mono">${esc(side)}</span><span class="path">${esc(path || "")}</span>${on ? icon("check") : "<span></span>"}</button>`;
-  };
-  let html = `<div class="cap">ЗАПУЩЕННЫЕ</div><div class="list">${running.length
-    ? running.map((a) => row(a.name, a.path, a.window ? "окно" : "PID " + (a.pid || ""))).join("")
-    : `<div class="empty">${q ? "Среди запущенных не найдено." : "Запущенных приложений нет."}</div>`}</div>`;
-  if (q) {
-    html += `<div class="cap">УСТАНОВЛЕННЫЕ</div><div class="list">${installed.length
-      ? installed.map((a) => row(a.name, a.path, "установлено")).join("")
-      : `<div class="empty">${modal.installed ? "Не найдено. Укажите путь через «Обзор…»." : "Ищу установленные приложения…"}</div>`}</div>`;
-  }
-  return html;
-}
-function refreshPicker() {
-  const box = document.getElementById("r-picks");
-  if (box && modal && modal.kind === "rule") setHTML(box, pickerHTML());
 }
 function trayHTML() {
   const menu = (running, top) => `<div class="tray-card" style="top:${top}px;${running ? "right:80px" : "left:340px"}">
@@ -916,11 +814,6 @@ async function post(path, body) {
 }
 function rulesJSON() {
   return JSON.stringify(cfg().rules || []);
-}
-function touchRules() {
-  rulesDirty = rulesJSON() !== rulesSnapshot;
-  renderDirty();
-  if (page === "rules") fillRules();
 }
 function rememberRules() {
   rulesSnapshot = rulesJSON();
@@ -983,9 +876,13 @@ async function refresh() {
     if (next.eventsSame) next.events = (state && state.events) || [];
     const err = next.error;
     next.error = "";
-    const keep = rulesDirty && state ? cfg().rules : null;
+    // While an Apps-tab save is in flight, keep the local rules and groups:
+    // this answer may predate it.
+    const keep = (rulesDirty || apSaving > 0) && state ? cfg().rules : null;
+    const keepGroups = apSaving > 0 && state ? cfg().groups : undefined;
     state = next;
     if (keep) state.config.rules = keep;
+    if (keepGroups !== undefined) state.config.groups = keepGroups;
     else rememberRules();
     if (!paused) frozen = null;
     render();
@@ -1038,14 +935,6 @@ async function saveConfig(extra) {
     render();
   } else if (extra.rules) rememberRules();
 }
-function moveRule(from, to) {
-  if (from === to || Number.isNaN(from) || Number.isNaN(to)) return;
-  const rules = cfg().rules;
-  const [item] = rules.splice(from, 1);
-  rules.splice(to, 0, item);
-  sel.rule = to;
-  touchRules();
-}
 function showToast(text) {
   if (text && /порт/i.test(text) && /занят/i.test(text)) {
     showAlert("Порт занят", text);
@@ -1087,38 +976,6 @@ function openProxy(index) {
   const draft = JSON.parse(JSON.stringify(src));
   modal = { kind: "proxy", index, draft, showPass: false, report: null, parsedLink: draft.link || "", parseError: "" };
   renderModal();
-}
-async function openRule(index) {
-  const src = index >= 0 ? cfg().rules[index] : { enabled: true, process: "", action: "proxy", proxy: (cfg().proxies[0] || {}).name || "" };
-  modal = { kind: "rule", index, draft: { ...src, enabled: src.enabled !== false }, q: "", apps: [] };
-  renderModal();
-  if (DEMO) {
-    modal.apps = [
-      { name: "chrome.exe", pid: 4120, path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" },
-      { name: "telegram.exe", pid: 7788, path: "C:\\Program Files\\Telegram Desktop\\Telegram.exe" },
-      { name: "curl.exe", pid: 9012, path: "C:\\Windows\\System32\\curl.exe" },
-      { name: "code.exe", pid: 3344, path: "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" },
-    ];
-    modal.installed = [
-      { name: "Telegram Desktop", path: "C:\\Users\\user\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe" },
-      { name: "Discord", path: "C:\\Users\\user\\AppData\\Local\\Discord\\app-1.0.9\\Discord.exe" },
-      { name: "Steam", path: "C:\\Program Files (x86)\\Steam\\steam.exe" },
-    ];
-    if (index < 0) modal.draft.process = "telegram.exe";
-    renderModal();
-    return;
-  }
-  const mine = modal;
-  apiFetch("/api/processes").then((r) => r.json()).then((list) => {
-    if (modal !== mine) return;
-    modal.apps = list;
-    refreshPicker();
-  }).catch(() => { /* picker stays empty */ });
-  apiFetch("/api/installed").then((r) => r.json()).then((list) => {
-    if (modal !== mine) return;
-    modal.installed = list;
-    refreshPicker();
-  }).catch(() => { if (modal === mine) { modal.installed = []; refreshPicker(); } });
 }
 function readProxyDraft() {
   if (!modal || !document.getElementById("p-name")) return;
@@ -1299,44 +1156,9 @@ function linkFail(msg) {
   if (!rest || rest === String(msg || "").trim()) return "Ссылка не разобрана";
   return "Ссылка не разобрана. " + rest;
 }
-// readRuleDraft copies the dialog's inputs into the draft before it is
-// redrawn, so typing in the search box or switching the action keeps the
-// chosen process and proxy.
-function readRuleDraft() {
-  if (!modal || modal.kind !== "rule") return;
-  const proc = document.getElementById("r-proc");
-  if (proc) modal.draft.process = proc.value;
-  const px = document.getElementById("r-proxy");
-  if (px && !px.disabled && px.value) modal.draft.proxy = px.value;
-}
-function commitRule() {
-  let proc = document.getElementById("r-proc").value.trim().replace(/^"+|"+$/g, "");
-  // "chrome" means chrome.exe; a bare name never matched before.
-  if (proc && !/[\\/]/.test(proc) && !/^[A-Za-z]:/.test(proc) && !/\.[A-Za-z0-9]+$/.test(proc)) proc += ".exe";
-  modal.draft.process = proc;
-  if (modal.draft.action === "proxy") modal.draft.proxy = document.getElementById("r-proxy").value;
-  else modal.draft.proxy = "";
-  if (!proc) { showToast("Укажите процесс"); return; }
-  if (/^svchost\.exe$/i.test(baseName(proc))) { showToast("Не указывайте svchost.exe"); return; }
-  if (modal.draft.action === "proxy" && !modal.draft.proxy) { showToast("Сначала добавьте прокси"); return; }
-  const list = cfg().rules;
-  const item = { ...modal.draft, enabled: modal.draft.enabled !== false };
-  if (!item.proxy) delete item.proxy;
-  if (item.children !== false) delete item.children;
-  if (modal.index < 0) list.push(item);
-  else list[modal.index] = item;
-  modal = null;
-  touchRules();
-  render();
-}
-function chosenProcess(name, path) {
-  if (!path) return name || "";
-  if (/\.exe$/i.test(path)) return path;
-  const sep = path.includes("/") && !path.includes("\\") ? "/" : "\\";
-  return path.replace(/[\\/]+$/, "") + sep + (name || "");
-}
 function proxyInUse(name) {
-  return (cfg().rules || []).some((r) => r.proxy === name) || (cfg().dns.includeSystemResolver && cfg().dns.systemResolverProxy === name);
+  return (cfg().rules || []).some((r) => r.proxy === name) || (cfg().groups || []).some((g) => g.proxy === name) ||
+    (cfg().dns.includeSystemResolver && cfg().dns.systemResolverProxy === name);
 }
 // dnsServer adds the default port to a bare IP: "1.1.1.1" -> "1.1.1.1:53".
 function dnsServer(s) {
@@ -1377,6 +1199,7 @@ function onClick(e) {
   const id = act.dataset.act;
   const i = Number(act.dataset.i);
   if (id === "copy-text") { copyText(act.dataset.text || ""); return; }
+  if (id.startsWith("ap-")) { appsClick(id, act); return; }
   if (id === "goto") { page = act.dataset.page; built = ""; render(); return; }
   if (id === "sel-proxy") { sel.proxy = i; fillProxies(); return; }
   if (id === "sel-log") {
@@ -1391,7 +1214,7 @@ function onClick(e) {
     const proc = (act.dataset.proc || "").toLowerCase();
     page = "rules";
     built = "";
-    sel.rule = (cfg().rules || []).findIndex((r) => String(r.process || "").toLowerCase() === proc || baseName(r.process).toLowerCase() === baseName(proc).toLowerCase());
+    apQuery = appLabel(proc);
     render();
     return;
   }
@@ -1440,23 +1263,6 @@ function onClick(e) {
       if (state && checks) state.checks = checks;
       fillProxies();
     }).catch((err) => { probing = {}; fillProxies(); showToast(err.message); });
-    return;
-  }
-  if (id === "rule-add") return openRule(-1);
-  if (id === "rule-toggle") {
-    const r = cfg().rules[i];
-    r.enabled = r.enabled === false;
-    touchRules();
-    return;
-  }
-  if (id === "menu-rule") {
-    const items = [];
-    if (i > 0) items.push({ id: "up", label: "Выше", run: () => moveRule(i, i - 1) });
-    if (i < cfg().rules.length - 1) items.push({ id: "down", label: "Ниже", run: () => moveRule(i, i + 1) });
-    items.push({ id: "copy", label: "Скопировать путь", run: () => copyText(cfg().rules[i].process || "") });
-    items.push({ id: "edit", label: "Изменить", run: () => openRule(i) });
-    items.push({ id: "del", label: "Удалить", danger: true, run: () => { cfg().rules.splice(i, 1); touchRules(); } });
-    openMenu(e.clientX, e.clientY, items);
     return;
   }
   if (id === "head-more") {
@@ -1557,36 +1363,6 @@ function onClick(e) {
       ensureVLESS(modal.draft).then(run).catch((err) => showToast(err.message));
     } else run();
     return;
-  }
-  if (id === "browse") {
-    if (DEMO) return;
-    post("/api/browse").then((res) => {
-      if (res.path && modal && modal.kind === "rule") { readRuleDraft(); modal.draft.process = res.path; renderModal(); }
-    }).catch((err) => { if (err.message && err.message !== "отменено") showToast(err.message); });
-    return;
-  }
-  if (id === "pick") {
-    readRuleDraft();
-    modal.draft.process = chosenProcess(act.dataset.name, act.dataset.path);
-    renderModal();
-    return;
-  }
-  if (id === "raction") {
-    readRuleDraft();
-    modal.draft.action = act.dataset.value;
-    renderModal();
-    return;
-  }
-  if (id === "rchildren") {
-    readRuleDraft();
-    modal.draft.children = modal.draft.children === false;
-    renderModal();
-    return;
-  }
-  if (id === "renabled") {
-    readRuleDraft();
-    modal.draft.enabled = modal.draft.enabled === false;
-    renderModal();
   }
 }
 function probeNamed(name) {
@@ -1698,7 +1474,7 @@ function realityFail(draft, rep) {
 function deleteProxy(i) {
   const name = cfg().proxies[i].name;
   if (proxyInUse(name)) {
-    showAlert("Прокси используется", "«" + name + "» указан в приложении или в системном резолвере. Сначала смените их, потом удаляйте прокси.");
+    showAlert("Прокси используется", "«" + name + "» указан в приложении, группе или системном резолвере. Сначала смените их, потом удаляйте прокси.");
     return;
   }
   askConfirm("Удалить прокси?", "«" + name + "» исчезнет из списка. Это нельзя отменить.", "Удалить", true, () => {
@@ -1712,7 +1488,7 @@ function onSubmit(e) {
   if (!form) return;
   e.preventDefault();
   if (modal && modal.kind === "proxy") commitProxy();
-  else if (modal && modal.kind === "rule") commitRule();
+  else if (modal && AP_MODALS[modal.kind]) appsSubmit();
   else if (modal && modal.kind === "confirm") {
     const run = modal.run;
     modal = null;
@@ -1753,17 +1529,13 @@ function bootChrome() {
   });
   document.body.addEventListener("submit", onSubmit);
   document.body.addEventListener("input", (e) => {
+    if (appsInput(e)) return;
     if (e.target.id === "p-socks" && modal && modal.draft && modal.draft.type === "vless") {
       readProxyDraft();
       const box = document.getElementById("socks-preview");
       if (box) box.outerHTML = socksPreviewHTML(modal.draft);
     }
     if (e.target.id === "log-filter") { logFilter = e.target.value; fillLog(); }
-    if ((e.target.id === "r-find" || e.target.id === "r-proc") && modal && modal.kind === "rule") {
-      if (e.target.id === "r-find") modal.q = e.target.value;
-      readRuleDraft();
-      refreshPicker();
-    }
   });
   // Text and select settings save when the user finishes editing, not on
   // every keystroke: a half-typed DNS address used to pop an error.
@@ -1789,7 +1561,12 @@ function bootChrome() {
         saveConfig({ rules: true }).catch((err) => showToast(err.message));
       }
     }
-    if (e.key === "Escape") { modal = null; closeMenu(); renderModal(); }
+    if (e.key === "Escape") {
+      modal = null;
+      closeMenu();
+      renderModal();
+      if (apOpen) { apOpen = ""; if (page === "rules") fillApps(); }
+    }
   });
   document.addEventListener("click", (e) => {
     if (!e.target.closest("#menu") && !e.target.closest("[data-act='menu-proxy']") && !e.target.closest("[data-act='menu-rule']") && !e.target.closest("[data-act='head-more']")) closeMenu();
@@ -1829,13 +1606,13 @@ async function main() {
     render();
     if (location.hash === "#proxy-dialog") openProxy(0);
     if (location.hash === "#vless-dialog") openProxy(cfg().proxies.findIndex((p) => p.type === "vless"));
-    if (location.hash === "#rule-dialog") openRule(-1);
+    if (location.hash === "#rule-dialog") apOpenAdd();
     if (location.hash === "#start-error") showStartError("доступ запрещён; запустите Ashgate от имени администратора (код 5)");
     window.addEventListener("hashchange", () => {
       modal = null; applyRoute(); render();
       if (location.hash === "#proxy-dialog") openProxy(0);
       if (location.hash === "#vless-dialog") openProxy(cfg().proxies.findIndex((p) => p.type === "vless"));
-      if (location.hash === "#rule-dialog") openRule(-1);
+      if (location.hash === "#rule-dialog") apOpenAdd();
     });
     return;
   }

@@ -336,3 +336,31 @@ func TestDNSServerMustBeIP(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGroupValidation(t *testing.T) {
+	base := func() *Config {
+		c := Default()
+		c.Proxies = []Proxy{{Name: "p", Type: "socks5", Address: "127.0.0.1:1080"}}
+		c.Groups = []Group{{Name: "Игры", Action: "proxy", Proxy: "p"}}
+		c.Rules = []Rule{{Process: "steam.exe", Action: "direct", Group: "Игры"}}
+		return c
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c := base()
+	c.Rules[0].Group = "Нет"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "unknown group") {
+		t.Fatalf("unknown group: %v", err)
+	}
+	c = base()
+	c.Groups = append(c.Groups, Group{Name: "Игры", Action: "direct"})
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate group") {
+		t.Fatalf("duplicate: %v", err)
+	}
+	c = base()
+	c.Groups[0].Proxy = "gone"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "unknown proxy") {
+		t.Fatalf("group proxy: %v", err)
+	}
+}

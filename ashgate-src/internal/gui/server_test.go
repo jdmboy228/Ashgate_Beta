@@ -11,6 +11,7 @@ import (
 	"ashgate/internal/killswitch"
 	"ashgate/internal/logbuf"
 	"ashgate/internal/probe"
+	"ashgate/internal/process"
 	"ashgate/internal/vless"
 )
 
@@ -63,6 +64,8 @@ func TestUIShellServed(t *testing.T) {
 		{"/app.js", "Вставить ссылку"},
 		{"/app.js", "Локальный SOCKS5-порт"},
 		{"/app.js", "блокировать"},
+		{"/", `src="apps.js"`},
+		{"/apps.js", "Создать группу приложений"},
 		{"/app.css", "#FF7A45"},
 		{"/logo.svg", "svg"},
 	} {
@@ -174,5 +177,26 @@ func TestKillSwitchBlocksWhileStopped(t *testing.T) {
 	c.syncKill()
 	if got := fw.Blocked(); len(got) != 0 {
 		t.Fatalf("switch off left %v", got)
+	}
+}
+
+func TestIconPathResolvesNamesAndMasks(t *testing.T) {
+	oldRun, oldInst := listRunning, listInstalled
+	defer func() { listRunning, listInstalled = oldRun, oldInst }()
+	listRunning = func() ([]process.App, error) {
+		return []process.App{{Name: "Discord.exe", Path: `C:\U\Discord\app-1.0.9\Discord.exe`}}, nil
+	}
+	listInstalled = func() []process.Installed {
+		return []process.Installed{{Name: "Telegram Desktop", Path: `C:\T\Telegram.exe`}}
+	}
+	for in, want := range map[string]string{
+		`C:\X\a.exe`:                  `C:\X\a.exe`,
+		"telegram":                    `C:\T\Telegram.exe`,
+		`*\Discord\app-*\Discord.exe`: `C:\U\Discord\app-1.0.9\Discord.exe`,
+		"nothere.exe":                 "",
+	} {
+		if got := iconPath(in); got != want {
+			t.Fatalf("iconPath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

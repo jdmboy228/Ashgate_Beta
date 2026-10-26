@@ -65,6 +65,14 @@ func (s *Session) FlowCounts() (tcp, udp int) {
 	return s.eng.FlowCounts()
 }
 
+// RuleStats returns per-rule counters, keyed by engine.RuleKey.
+func (s *Session) RuleStats() map[string]engine.RuleStat {
+	if s == nil || s.eng == nil {
+		return nil
+	}
+	return s.eng.RuleStats()
+}
+
 // Traffic is bytes relayed by this session.
 func (s *Session) Traffic() (up, down int64) {
 	if s == nil || s.eng == nil {

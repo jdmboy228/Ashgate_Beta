@@ -30,11 +30,13 @@ func (c *controller) ksLoop() {
 	}
 }
 
-// killTargets lists the programs proxy rules cover: path rules, installed
-// or running images for name rules, and running processes that inherit a
-// rule from a parent. missing lists name rules with no known executable.
+// killTargets lists the programs that proxy rules with the kill switch
+// cover: exact path rules, running and installed images that a name or
+// mask rule matches, and running processes that inherit such a rule from
+// a parent. missing lists rules with no known executable.
 func killTargets(cfg *config.Config) (paths, missing []string) {
-	set := rules.Compile(cfg.Rules)
+	eff := cfg.EffectiveRules()
+	set := rules.Compile(eff)
 	seen := map[string]bool{}
 	add := func(p string) {
 		if k := strings.ToLower(p); p != "" && !seen[k] {
@@ -44,27 +46,24 @@ func killTargets(cfg *config.Config) (paths, missing []string) {
 	}
 	running := process.Snapshot()
 	for _, p := range running {
-		if set.Match(p).Action == "proxy" {
+		if d := set.Match(p); d.Action == "proxy" && d.KillSwitch {
 			add(p.Path)
 		}
 	}
 	var installed []process.Installed
-	for _, r := range cfg.Rules {
-		if !r.IsEnabled() || r.Action != "proxy" {
+	for _, r := range eff {
+		if !r.IsEnabled() || r.Action != "proxy" || !r.RuleKillSwitch() {
 			continue
 		}
 		raw := strings.Trim(strings.TrimSpace(r.Process), `"`)
-		if rules.IsPath(raw) {
+		if rules.IsPath(raw) && !strings.ContainsAny(raw, "*?") {
 			add(strings.TrimPrefix(raw, `\\?\`))
 			continue
 		}
-		name := rules.NormalizeName(raw)
-		if !strings.Contains(name, ".") {
-			name += ".exe"
-		}
+		one := rules.Compile([]config.Rule{r})
 		found := false
 		for _, p := range running {
-			if rules.Base(p.Path) == name {
+			if one.Match(rules.Process{Name: p.Name, Path: p.Path}).Action != "" {
 				found = true
 			}
 		}
@@ -72,7 +71,7 @@ func killTargets(cfg *config.Config) (paths, missing []string) {
 			installed = process.InstalledApps()
 		}
 		for _, a := range installed {
-			if rules.Base(a.Path) == name {
+			if one.Match(rules.Process{Name: rules.Base(a.Path), Path: a.Path}).Action != "" {
 				add(a.Path)
 				found = true
 			}
@@ -82,6 +81,16 @@ func killTargets(cfg *config.Config) (paths, missing []string) {
 		}
 	}
 	return paths, missing
+}
+
+// killWanted reports whether any enabled proxy rule has the kill switch.
+func killWanted(cfg *config.Config) bool {
+	for _, r := range cfg.EffectiveRules() {
+		if r.IsEnabled() && r.Action == "proxy" && r.RuleKillSwitch() {
+			return true
+		}
+	}
+	return false
 }
 
 // syncKill applies the kill switch for the current state: rules absent
@@ -101,7 +110,7 @@ func (c *controller) syncKill() {
 	var err error
 	var missing []string
 	switch {
-	case !cfg.KillSwitch:
+	case !killWanted(cfg):
 		if len(fw.Blocked()) > 0 {
 			err = fw.Unblock()
 		}

@@ -28,6 +28,8 @@ type Config struct {
 	UI         UI      `json:"ui,omitempty"`
 	Proxies    []Proxy `json:"proxies"`
 	Rules      []Rule  `json:"rules"`
+	// Groups bundle rules under one switch and one route; see Rule.Group.
+	Groups []Group `json:"groups,omitempty"`
 	// Extra keeps JSON keys this version does not understand, such as the
 	// Dolphin block from 0.4.x. Saving the file must not drop them.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -88,7 +90,55 @@ type Rule struct {
 	// Children, when not false, applies the rule to processes the
 	// application starts, at any depth. A missing flag means true.
 	Children *bool `json:"children,omitempty"`
+	// KillSwitch overrides Config.KillSwitch for this rule; nil follows it.
+	KillSwitch *bool `json:"killSwitch,omitempty"`
+	// TCPOnly drops the application's UDP instead of proxying it, so
+	// QUIC and similar fall back to TCP through the proxy.
+	TCPOnly bool `json:"tcpOnly,omitempty"`
+	// Group names the group this rule belongs to. The group's switch and
+	// route (action and proxy) apply to all its rules.
+	Group string `json:"group,omitempty"`
 }
+
+// Group is a named set of rules with one switch and one route.
+type Group struct {
+	Name      string `json:"name"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+	Action    string `json:"action"`
+	Proxy     string `json:"proxy,omitempty"`
+	Collapsed bool   `json:"collapsed,omitempty"`
+}
+
+// IsEnabled reports whether the group is on. A missing flag means on.
+func (g Group) IsEnabled() bool { return g.Enabled == nil || *g.Enabled }
+
+// EffectiveRules returns the rules as the engine applies them: a grouped
+// rule takes its group's switch and route, and every rule's KillSwitch is
+// set (rule override or the global default).
+func (c *Config) EffectiveRules() []Rule {
+	groups := make(map[string]Group, len(c.Groups))
+	for _, g := range c.Groups {
+		groups[g.Name] = g
+	}
+	out := make([]Rule, len(c.Rules))
+	for i, r := range c.Rules {
+		if g, ok := groups[r.Group]; ok && r.Group != "" {
+			on := r.IsEnabled() && g.IsEnabled()
+			r.Enabled = &on
+			r.Action, r.Proxy = g.Action, g.Proxy
+		}
+		ks := c.KillSwitch
+		if r.KillSwitch != nil {
+			ks = *r.KillSwitch
+		}
+		r.KillSwitch = &ks
+		out[i] = r
+	}
+	return out
+}
+
+// RuleKillSwitch reports the kill switch in effect for r.
+func (r Rule) RuleKillSwitch() bool { return r.KillSwitch != nil && *r.KillSwitch }
 
 // IsEnabled reports whether the rule is active. A missing flag means enabled.
 func (r Rule) IsEnabled() bool {
@@ -225,7 +275,24 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	groups := map[string]bool{}
+	for i, g := range c.Groups {
+		name := strings.TrimSpace(g.Name)
+		if name == "" || len(name) > 64 || name != g.Name {
+			return fmt.Errorf("groups[%d]: invalid name %q", i, g.Name)
+		}
+		if groups[name] {
+			return fmt.Errorf("groups[%d]: duplicate group %q", i, name)
+		}
+		groups[name] = true
+		if err := checkRoute(g.Action, g.Proxy, names); err != nil {
+			return fmt.Errorf("groups[%d]: %w", i, err)
+		}
+	}
 	for i, r := range c.Rules {
+		if r.Group != "" && !groups[r.Group] {
+			return fmt.Errorf("rules[%d]: unknown group %q", i, r.Group)
+		}
 		if strings.TrimSpace(r.Process) == "" {
 			return fmt.Errorf("rules[%d]: process is required", i)
 		}
@@ -237,21 +304,31 @@ func (c *Config) Validate() error {
 		if base == "svchost.exe" {
 			return fmt.Errorf("rules[%d]: do not match svchost.exe; use dns.includeSystemResolver for system DNS", i)
 		}
-		switch r.Action {
-		case "proxy":
-			if r.Proxy == "" {
-				return fmt.Errorf("rules[%d]: proxy is required when action is proxy", i)
-			}
-			if _, ok := names[r.Proxy]; !ok {
-				return fmt.Errorf("rules[%d]: unknown proxy %q", i, r.Proxy)
-			}
-		case "direct", "block":
-			if r.Proxy != "" {
-				return fmt.Errorf("rules[%d]: proxy must be empty when action is direct or block", i)
-			}
-		default:
-			return fmt.Errorf("rules[%d]: action must be proxy, direct or block, got %q", i, r.Action)
+		if r.Group != "" {
+			continue // the group's route applies and is checked above
 		}
+		if err := checkRoute(r.Action, r.Proxy, names); err != nil {
+			return fmt.Errorf("rules[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func checkRoute(action, proxy string, names map[string]struct{}) error {
+	switch action {
+	case "proxy":
+		if proxy == "" {
+			return errors.New("proxy is required when action is proxy")
+		}
+		if _, ok := names[proxy]; !ok {
+			return fmt.Errorf("unknown proxy %q", proxy)
+		}
+	case "direct", "block":
+		if proxy != "" {
+			return errors.New("proxy must be empty when action is direct or block")
+		}
+	default:
+		return fmt.Errorf("action must be proxy, direct or block, got %q", action)
 	}
 	return nil
 }
@@ -314,6 +391,7 @@ func (c *Config) ProxyByName(name string) (Proxy, bool) {
 var knownConfigKeys = map[string]bool{
 	"version": true, "relay": true, "dns": true, "bypassPrivate": true,
 	"udpUnsupported": true, "killSwitch": true, "log": true, "ui": true, "proxies": true, "rules": true,
+	"groups": true,
 }
 
 // Load reads a config file, applies defaults, and validates it.

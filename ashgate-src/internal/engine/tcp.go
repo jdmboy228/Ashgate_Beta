@@ -28,6 +28,7 @@ type tcpFlow struct {
 	conn     net.Conn
 	live     bool
 	parent   string
+	stat     *ruleStat
 	mu       sync.Mutex
 }
 
@@ -65,6 +66,7 @@ func (e *Engine) serveFlow(conn net.Conn, flow *tcpFlow) {
 	upstream, err := e.dial.DialTCP(ctx, flow.proxy, flow.orig.NetIP().String(), flow.orig.Port)
 	cancel()
 	if err != nil {
+		flow.stat.fail(err.Error(), e.now())
 		e.log(logbuf.Event{
 			Process: display(flow.proc),
 			PID:     flow.proc.PID,
@@ -88,7 +90,7 @@ func (e *Engine) serveFlow(conn net.Conn, flow *tcpFlow) {
 		Parent:  flow.parent,
 	})
 	var up, down atomic.Int64
-	splice(conn, upstream, counter{&up, &e.bytesUp}, counter{&down, &e.bytesDown})
+	splice(conn, upstream, counter{&up, &e.bytesUp, flow.stat.upCounter()}, counter{&down, &e.bytesDown, flow.stat.downCounter()})
 	e.log(logbuf.Event{
 		Process:   display(flow.proc),
 		PID:       flow.proc.PID,
@@ -125,6 +127,9 @@ func (e *Engine) dropFlowLocked(flow *tcpFlow) {
 	if flow.live {
 		flow.live = false
 		e.active.Add(-1)
+		if flow.stat != nil {
+			flow.stat.flows.Add(-1)
+		}
 	}
 	flow.mu.Lock()
 	c := flow.conn
@@ -142,11 +147,29 @@ func (e *Engine) dropFlowLocked(flow *tcpFlow) {
 // of jumping when the connection closes.
 type counter struct {
 	flow, total *atomic.Int64
+	rule        *atomic.Int64 // may be nil
 }
 
 func (c counter) add(n int) {
 	c.flow.Add(int64(n))
 	c.total.Add(int64(n))
+	if c.rule != nil {
+		c.rule.Add(int64(n))
+	}
+}
+
+func (s *ruleStat) upCounter() *atomic.Int64 {
+	if s == nil {
+		return nil
+	}
+	return &s.up
+}
+
+func (s *ruleStat) downCounter() *atomic.Int64 {
+	if s == nil {
+		return nil
+	}
+	return &s.down
 }
 
 type countWriter struct {

@@ -19,10 +19,12 @@ import (
 	"time"
 
 	"ashgate/internal/config"
+	"ashgate/internal/engine"
 	"ashgate/internal/killswitch"
 	"ashgate/internal/logbuf"
 	"ashgate/internal/probe"
 	"ashgate/internal/process"
+	"ashgate/internal/rules"
 	rt "ashgate/internal/runtime"
 	"ashgate/internal/version"
 	"ashgate/internal/vless"
@@ -68,6 +70,11 @@ type controller struct {
 	guardStop func()
 	ksMissing []string
 	ksErr     string
+
+	// Per-rule speed sampling; see ruleStatsLocked.
+	statPrev  map[string]engine.RuleStat
+	statAt    time.Time
+	statRates map[string][2]int64
 }
 
 // tokenHeader carries controller.token on every API request.
@@ -238,7 +245,7 @@ func (c *controller) api(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		png, err := process.ExeIconPNG(r.URL.Query().Get("path"))
+		png, err := process.ExeIconPNG(iconPath(r.URL.Query().Get("path")))
 		if err != nil || len(png) == 0 {
 			http.NotFound(w, r)
 			return
@@ -346,6 +353,7 @@ type stateView struct {
 	Checks     map[string]probe.Report `json:"checks"`
 	Bridges    map[string]vless.Status `json:"bridges"`
 	KillSwitch ksView                  `json:"killSwitch"`
+	RuleStats  map[string]ruleStatView `json:"ruleStats"`
 	Events     []eventView             `json:"events"`
 	EventsSame bool                    `json:"eventsSame,omitempty"`
 	Generation uint64                  `json:"generation"`
@@ -428,7 +436,8 @@ func (c *controller) snapshotSince(since uint64) stateView {
 		Config:     cfg,
 		Checks:     checks,
 		Bridges:    bridges,
-		KillSwitch: c.ksSnapshot(cfg.KillSwitch),
+		KillSwitch: c.ksSnapshot(killWanted(cfg)),
+		RuleStats:  c.ruleStatsLocked(time.Now()),
 		Events:     events,
 		EventsSame: same,
 		Generation: g,
@@ -722,6 +731,12 @@ func ruConfig(err error) string {
 		return "Для действия «прокси» выберите сервер."
 	case strings.Contains(s, "must be empty"):
 		return "Для «напрямую» и «блокировать» поле прокси должно быть пустым."
+	case strings.Contains(s, "duplicate group"):
+		return "Группа с таким названием уже есть."
+	case strings.Contains(s, "unknown group"):
+		return "Правило ссылается на группу, которой нет."
+	case strings.HasPrefix(s, "groups[") && strings.Contains(s, "invalid name"):
+		return "Название группы: от 1 до 64 символов, без пробелов по краям."
 	case strings.Contains(s, "duplicate"):
 		return "Имя прокси уже занято."
 	case strings.Contains(s, "invalid name"):
@@ -764,3 +779,37 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeErr(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 }
+
+// iconPath turns a rule's process field into an exe to take the icon from.
+// A full path is used as is; a name or a mask ("telegram",
+// `*\Discord\app-*\Discord.exe`) is looked up among running and installed
+// programs.
+func iconPath(process string) string {
+	process = strings.Trim(strings.TrimSpace(process), `"`)
+	if rules.IsPath(process) && !strings.ContainsAny(process, "*?") {
+		return process
+	}
+	one := rules.Compile([]config.Rule{{Process: process, Action: "direct"}})
+	hit := func(name, path string) bool {
+		return path != "" && one.Match(rules.Process{Name: name, Path: path}).Action != ""
+	}
+	if apps, err := listRunning(); err == nil {
+		for _, a := range apps {
+			if hit(a.Name, a.Path) {
+				return a.Path
+			}
+		}
+	}
+	for _, a := range listInstalled() {
+		if hit(rules.Base(a.Path), a.Path) {
+			return a.Path
+		}
+	}
+	return ""
+}
+
+// Indirections so tests can run without Windows process lists.
+var (
+	listRunning   = process.List
+	listInstalled = process.InstalledApps
+)

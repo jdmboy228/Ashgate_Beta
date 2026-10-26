@@ -29,6 +29,9 @@ type Decision struct {
 	// Parent names the ancestor whose rule was inherited; empty when the
 	// process matched a rule itself.
 	Parent string
+	// KillSwitch and TCPOnly are the matched rule's settings.
+	KillSwitch bool
+	TCPOnly    bool
 }
 
 // Set is an immutable list of enabled rules in config order.
@@ -43,9 +46,16 @@ type compiled struct {
 	proxy    string
 	index    int
 	children bool
+	ks       bool
+	tcpOnly  bool
+	// glob is set when match contains '*' or '?'.
+	glob bool
 }
 
-// Compile keeps enabled rules in order. Disabled rules are skipped.
+// Compile keeps enabled rules in order. Disabled rules are skipped. Pass
+// Config.EffectiveRules so groups and the kill-switch default apply.
+// A '*' in a rule matches any run of characters, '\' included, so
+// `*\Discord\app-*\Discord.exe` survives Discord's versioned folders.
 func Compile(rules []config.Rule) *Set {
 	out := &Set{rules: make([]compiled, 0, len(rules))}
 	for i, r := range rules {
@@ -54,17 +64,19 @@ func Compile(rules []config.Rule) *Set {
 		}
 		raw := strings.TrimSpace(r.Process)
 		raw = strings.Trim(raw, `"`)
-		c := compiled{action: r.Action, proxy: r.Proxy, index: i, children: r.CoversChildren()}
+		c := compiled{action: r.Action, proxy: r.Proxy, index: i, children: r.CoversChildren(),
+			ks: r.RuleKillSwitch(), tcpOnly: r.TCPOnly}
 		if IsPath(raw) {
 			c.path = true
 			c.match = NormalizePath(raw)
 		} else {
 			c.match = NormalizeName(raw)
 			// "chrome" means chrome.exe; every process image has an extension.
-			if c.match != "" && !strings.Contains(c.match, ".") {
+			if c.match != "" && !strings.Contains(c.match, ".") && !strings.HasSuffix(c.match, "*") {
 				c.match += ".exe"
 			}
 		}
+		c.glob = strings.ContainsAny(c.match, "*?")
 		out.rules = append(out.rules, c)
 	}
 	return out
@@ -81,7 +93,7 @@ func (s *Set) Match(p Process) Decision {
 		return Decision{RuleIndex: -1}
 	}
 	if r, ok := s.first(p); ok {
-		return Decision{Action: r.action, Proxy: r.proxy, RuleIndex: r.index}
+		return r.decision("")
 	}
 	for _, a := range p.Parents {
 		if IsShellOrSystem(a) {
@@ -92,10 +104,55 @@ func (s *Set) Match(p Process) Decision {
 			if parent == "" {
 				parent = Base(a.Path)
 			}
-			return Decision{Action: r.action, Proxy: r.proxy, RuleIndex: r.index, Parent: parent}
+			return r.decision(parent)
 		}
 	}
 	return Decision{RuleIndex: -1}
+}
+
+func (r compiled) decision(parent string) Decision {
+	return Decision{Action: r.action, Proxy: r.proxy, RuleIndex: r.index, Parent: parent, KillSwitch: r.ks, TCPOnly: r.tcpOnly}
+}
+
+func (r compiled) matches(name, path string) bool {
+	want := name
+	if r.path {
+		want = path
+	}
+	if want == "" {
+		return false
+	}
+	if r.glob {
+		return Glob(r.match, want)
+	}
+	return want == r.match
+}
+
+// Glob matches s against pattern, where '*' is any run of characters and
+// '?' is one character. Both are already lower-case.
+func Glob(pattern, s string) bool {
+	px, sx := 0, 0
+	star, mark := -1, 0
+	for sx < len(s) {
+		switch {
+		case px < len(pattern) && (pattern[px] == '?' || pattern[px] == s[sx]):
+			px++
+			sx++
+		case px < len(pattern) && pattern[px] == '*':
+			star, mark = px, sx
+			px++
+		case star >= 0:
+			px = star + 1
+			mark++
+			sx = mark
+		default:
+			return false
+		}
+	}
+	for px < len(pattern) && pattern[px] == '*' {
+		px++
+	}
+	return px == len(pattern)
 }
 
 func (s *Set) first(p Process) (compiled, bool) {
@@ -105,13 +162,7 @@ func (s *Set) first(p Process) (compiled, bool) {
 	}
 	path := NormalizePath(p.Path)
 	for _, r := range s.rules {
-		if r.path {
-			if path != "" && path == r.match {
-				return r, true
-			}
-			continue
-		}
-		if name != "" && name == r.match {
+		if r.matches(name, path) {
 			return r, true
 		}
 	}

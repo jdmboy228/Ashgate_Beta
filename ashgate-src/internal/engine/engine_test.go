@@ -613,3 +613,43 @@ func TestLaterFragmentsOfDroppedDatagramAreDropped(t *testing.T) {
 		t.Fatalf("unrelated fragment %v", res.Action)
 	}
 }
+
+func TestPerRuleKillSwitchAndTCPOnly(t *testing.T) {
+	off := false
+	cfg := testConfig()
+	cfg.KillSwitch = true
+	cfg.Rules[0].KillSwitch = &off // curl.exe opts out
+	cfg.Rules[2].TCPOnly = true    // browser.exe
+	inj := &memInj{}
+	e, _ := newEngine(t, cfg, fixedRes{p: rules.Process{PID: 5, Name: "curl.exe"}, ok: true}, &fakeDial{}, inj)
+	data, _ := packet.BuildTCP(packet.V4(10, 0, 0, 2, 3000), packet.V4(1, 2, 3, 4, 443), 0x18)
+	if res := e.HandlePacket(data, Meta{}, true); res.Action != ActionPass || inj.count() != 0 {
+		t.Fatalf("rule without kill switch was reset: %v", res.Action)
+	}
+
+	b, _ := newEngine(t, cfg, fixedRes{p: rules.Process{PID: 3, Name: "browser.exe", Path: `C:\Apps\browser.exe`}, ok: true}, &fakeDial{}, nil)
+	quic, _ := packet.BuildUDP(packet.V4(10, 0, 0, 4, 4444), packet.V4(1, 2, 3, 4, 443), []byte("q"))
+	if res := b.HandlePacket(quic, Meta{}, true); res.Action != ActionDrop {
+		t.Fatalf("tcp-only rule let udp through: %v", res.Action)
+	}
+	dns, _ := packet.BuildUDP(packet.V4(10, 0, 0, 4, 5353), packet.V4(1, 1, 1, 1, 53), []byte{1, 2, 3, 4})
+	if res := b.HandlePacket(dns, Meta{}, true); res.Action != ActionUDP {
+		t.Fatalf("tcp-only must still proxy dns: %v", res.Action)
+	}
+}
+
+func TestRuleStatsCountFlows(t *testing.T) {
+	e, _ := newEngine(t, testConfig(), fixedRes{p: rules.Process{PID: 5, Name: "curl.exe"}, ok: true}, &fakeDial{}, nil)
+	for i := 0; i < 3; i++ {
+		syn, _ := packet.BuildTCP(packet.V4(10, 0, 0, 2, uint16(3200+i)), packet.V4(1, 2, 3, 4, 443), 0x02)
+		e.HandlePacket(syn, Meta{}, true)
+	}
+	st := e.RuleStats()["curl.exe"]
+	if st.Flows != 3 {
+		t.Fatalf("flows %d (%+v)", st.Flows, e.RuleStats())
+	}
+	e.closeAll()
+	if st := e.RuleStats()["curl.exe"]; st.Flows != 0 {
+		t.Fatalf("flows after close %d", st.Flows)
+	}
+}

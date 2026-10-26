@@ -91,3 +91,44 @@ func TestChildInheritsParentRule(t *testing.T) {
 		t.Fatalf("rule spread through explorer: %+v", d)
 	}
 }
+
+func TestWildcardMask(t *testing.T) {
+	s := Compile([]config.Rule{{Process: `*\Discord\app-*\Discord.exe`, Action: "direct"}})
+	if d := s.Match(Process{Name: "Discord.exe", Path: `C:\Users\u\AppData\Local\Discord\app-1.0.9187\Discord.exe`}); d.Action != "direct" {
+		t.Fatalf("mask did not match: %+v", d)
+	}
+	if d := s.Match(Process{Name: "Discord.exe", Path: `C:\Other\Discord.exe`}); d.Action != "" {
+		t.Fatalf("mask matched another folder: %+v", d)
+	}
+	for _, c := range []struct {
+		p, s string
+		ok   bool
+	}{{"a*b", "ab", true}, {"a*b", "axxb", true}, {"a*b", "axxbc", false}, {"*", "", true}, {"a?c", "abc", true}, {"*\\x.exe", "c:\\x.exe", true}} {
+		if Glob(c.p, c.s) != c.ok {
+			t.Fatalf("Glob(%q, %q) != %v", c.p, c.s, c.ok)
+		}
+	}
+}
+
+func TestGroupAndKillSwitchSettings(t *testing.T) {
+	off, on := false, true
+	cfg := &config.Config{
+		KillSwitch: true,
+		Groups:     []config.Group{{Name: "Мессенджеры", Enabled: &on, Action: "proxy", Proxy: "v"}, {Name: "Off", Enabled: &off, Action: "direct"}},
+		Rules: []config.Rule{
+			{Process: "telegram.exe", Action: "direct", Group: "Мессенджеры", TCPOnly: true},
+			{Process: "steam.exe", Action: "proxy", Proxy: "v", Group: "Off"},
+			{Process: "curl.exe", Action: "proxy", Proxy: "v", KillSwitch: &off},
+		},
+	}
+	s := Compile(cfg.EffectiveRules())
+	if d := s.Match(Process{Name: "telegram.exe"}); d.Action != "proxy" || d.Proxy != "v" || !d.KillSwitch || !d.TCPOnly {
+		t.Fatalf("group route or settings lost: %+v", d)
+	}
+	if d := s.Match(Process{Name: "steam.exe"}); d.Action != "" {
+		t.Fatalf("disabled group still matched: %+v", d)
+	}
+	if d := s.Match(Process{Name: "curl.exe"}); d.KillSwitch {
+		t.Fatalf("rule override ignored: %+v", d)
+	}
+}

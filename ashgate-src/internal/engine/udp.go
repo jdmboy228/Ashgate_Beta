@@ -30,6 +30,7 @@ type udpFlow struct {
 	live   bool
 	closed bool
 	parent string
+	stat   *ruleStat
 	sess   dialer.Session
 	// failedAt is the last failed DialUDP. While the proxy is down, packets
 	// within udpRetry of it are dropped instead of each starting a new
@@ -78,12 +79,16 @@ func (e *Engine) forwardHTTPDns(ctx context.Context, flow *udpFlow, payload []by
 	server := flow.relay.String()
 	resp, err := httpproxy.DNSQuery(ctx, flow.proxy, server, payload)
 	if err != nil {
+		flow.stat.fail(err.Error(), e.now())
 		e.log(logbuf.Event{Process: display(flow.proc), PID: flow.proc.PID, Proto: "UDP", Dest: flow.orig.String(), Via: flow.proxy.Name, Status: "error", Error: err.Error()})
 		return err
 	}
 	n := int64(len(resp))
 	flow.down.Add(n)
 	e.bytesDown.Add(n)
+	if flow.stat != nil {
+		flow.stat.down.Add(n)
+	}
 	return e.injectUDP(flow, resp)
 }
 
@@ -99,6 +104,7 @@ func (e *Engine) forwardSOCKS(ctx context.Context, flow *udpFlow, d UDPDatagram)
 		}
 		sess, err := e.dial.DialUDP(ctx, flow.proxy)
 		if err != nil {
+			flow.stat.fail(err.Error(), e.now())
 			flow.failedAt = e.now()
 			e.log(logbuf.Event{Process: display(flow.proc), PID: flow.proc.PID, Proto: "UDP", Dest: flow.orig.String(), Via: flow.proxy.Name, Status: "error", Error: err.Error()})
 			return err
@@ -124,6 +130,9 @@ func (e *Engine) readUDP(flow *udpFlow, sess dialer.Session) {
 		n := int64(len(payload))
 		flow.down.Add(n)
 		e.bytesDown.Add(n)
+		if flow.stat != nil {
+			flow.stat.down.Add(n)
+		}
 		flow.touch(e.now())
 		if err := e.injectUDP(flow, payload); err != nil {
 			return
@@ -162,6 +171,9 @@ func (e *Engine) retireUDP(flow *udpFlow) {
 	}
 	dec := flow.live
 	flow.live = false
+	if dec && flow.stat != nil {
+		flow.stat.flows.Add(-1)
+	}
 	e.mu.Unlock()
 	if dec {
 		e.active.Add(-1)

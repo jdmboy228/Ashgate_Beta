@@ -122,6 +122,8 @@ type Engine struct {
 	// of reaching the destination directly.
 	fragDrop ageSet[fragKey]
 	udp      map[udpKey]*udpFlow
+	// stats are per-rule counters keyed by RuleKey.
+	stats map[string]*ruleStat
 	// rotatedAt is when the direct/block caches last aged; see sweep.
 	rotatedAt time.Time
 
@@ -162,9 +164,10 @@ type snapshot struct {
 	dns            config.DNS
 	udpUnsupported string
 	bypassPrivate  bool
-	killSwitch     bool
 	relay4         packet.Addr
 	relay6         packet.Addr
+	// ruleKeys maps a rule index to its RuleKey.
+	ruleKeys []string
 }
 
 // New compiles cfg and returns an engine. The relay addresses come from cfg.
@@ -191,6 +194,7 @@ func New(cfg *config.Config, opt Options) (*Engine, error) {
 		fragDrop:  newAgeSet[fragKey](),
 		udp:       map[udpKey]*udpFlow{},
 		dnsSem:    make(chan struct{}, httpDNSParallel),
+		stats:     map[string]*ruleStat{},
 	}
 	if e.alloc == nil {
 		e.alloc = OSAllocator{}
@@ -317,19 +321,23 @@ func compile(cfg *config.Config) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	keys := make([]string, len(cfg.Rules))
+	for i, r := range cfg.Rules {
+		keys[i] = RuleKey(r.Process)
+	}
 	proxies := make(map[string]config.Proxy, len(cfg.Proxies))
 	for _, p := range cfg.Proxies {
 		proxies[p.Name] = p
 	}
 	return &snapshot{
-		rules:          rules.Compile(cfg.Rules),
+		rules:          rules.Compile(cfg.EffectiveRules()),
 		proxies:        proxies,
 		dns:            cfg.DNS,
 		udpUnsupported: cfg.UDPUnsupported,
 		bypassPrivate:  cfg.BypassPrivate,
-		killSwitch:     cfg.KillSwitch,
 		relay4:         r4,
 		relay6:         r6,
+		ruleKeys:       keys,
 	}, nil
 }
 
@@ -436,6 +444,9 @@ func (e *Engine) fastPath(pkt []byte, h *packet.Header) (Result, bool) {
 			n := int64(h.PayloadLen)
 			flow.up.Add(n)
 			e.bytesUp.Add(n)
+			if flow.stat != nil {
+				flow.stat.up.Add(n)
+			}
 			return Result{Action: ActionUDP, UDP: datagram(pkt, h, flow)}, true
 		}
 		if e.directUDP.has(key) {
@@ -472,6 +483,10 @@ func (e *Engine) decide(pkt []byte, h *packet.Header, meta Meta, proc rules.Proc
 
 	dec := snap.rules.Match(proc)
 	parent := dec.Parent
+	var stat *ruleStat
+	if dec.RuleIndex >= 0 && dec.RuleIndex < len(snap.ruleKeys) {
+		stat = e.statFor(snap.ruleKeys[dec.RuleIndex])
+	}
 	proxyName := dec.Proxy
 	action := dec.Action
 	if action == "" && h.Dst.Port == 53 && snap.dns.IncludeSystemResolver && rules.IsSystemDNS(proc.Name) {
@@ -512,22 +527,30 @@ func (e *Engine) decide(pkt []byte, h *packet.Header, meta Meta, proc rules.Proc
 		}
 		if h.Proto == packet.ProtoTCP {
 			if !(h.SYN && !h.ACK) {
-				if snap.killSwitch {
+				if dec.KillSwitch {
 					return e.resetExisting(h, meta, proc, p, parent)
 				}
 				e.rememberDirect(h)
 				return Result{Action: ActionPass}
 			}
-			return e.startTCP(pkt, h, meta, proc, p, snap, parent)
+			return e.startTCP(pkt, h, meta, proc, p, snap, parent, stat)
 		}
-		return e.startUDP(pkt, h, meta, proc, p, snap, parent)
+		if dec.TCPOnly && h.Dst.Port != 53 {
+			// "Only TCP": drop UDP so QUIC and the like fall back to TCP,
+			// which goes through the proxy. DNS still goes via the proxy.
+			e.rememberBlock(h)
+			e.dropFragment(h)
+			e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: p.Name, Status: "blocked", Error: "только TCP: UDP отброшен", Parent: parent})
+			return Result{Action: ActionDrop}
+		}
+		return e.startUDP(pkt, h, meta, proc, p, snap, parent, stat, dec.KillSwitch)
 	default:
 		e.rememberDirect(h)
 		return Result{Action: ActionPass}
 	}
 }
 
-func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot, parent string) Result {
+func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot, parent string, stat *ruleStat) Result {
 	if h.Frag {
 		e.dropFragment(h)
 		e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "TCP", Dest: h.Dst.String(), Via: p.Name, Status: "blocked", Error: "fragmented tcp dropped"})
@@ -551,6 +574,10 @@ func (e *Engine) startTCP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 		created:  e.now(),
 		live:     true,
 		parent:   parent,
+		stat:     stat,
+	}
+	if stat != nil {
+		stat.flows.Add(1)
 	}
 	e.byClient[h.Src] = flow
 	e.byAlloc[allocKey{ver: h.Ver, port: port}] = flow
@@ -574,7 +601,7 @@ func (e *Engine) resetExisting(h *packet.Header, meta Meta, proc rules.Process, 
 	return Result{Action: ActionDrop}
 }
 
-func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot, parent string) Result {
+func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Process, p config.Proxy, snap *snapshot, parent string, stat *ruleStat, killSwitch bool) Result {
 	key := udpKey{Src: h.Src, Dst: h.Dst}
 	if h.Frag {
 		e.blockUDP.add(key)
@@ -583,7 +610,7 @@ func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 		return Result{Action: ActionDrop}
 	}
 	if p.Type != "socks5" && p.Type != "vless" && h.Dst.Port != 53 {
-		if snap.udpUnsupported == "direct" && !snap.killSwitch {
+		if snap.udpUnsupported == "direct" && !killSwitch {
 			e.directUDP.add(key)
 			e.log(logbuf.Event{Process: display(proc), PID: proc.PID, Proto: "UDP", Dest: h.Dst.String(), Via: "direct", Status: "direct", Error: "http proxy has no udp; sent direct"})
 			return Result{Action: ActionPass}
@@ -609,6 +636,11 @@ func (e *Engine) startUDP(pkt []byte, h *packet.Header, meta Meta, proc rules.Pr
 		sub:    meta.SubIfIdx,
 		live:   true,
 		parent: parent,
+		stat:   stat,
+	}
+	if stat != nil {
+		stat.flows.Add(1)
+		stat.up.Add(int64(h.PayloadLen))
 	}
 	flow.touch(e.now())
 	n := int64(h.PayloadLen)
