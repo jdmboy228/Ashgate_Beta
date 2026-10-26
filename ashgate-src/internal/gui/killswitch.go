@@ -161,3 +161,33 @@ func (c *controller) ksSnapshot(on bool) ksView {
 	v.Error = c.ksErr
 	return v
 }
+
+// kickKill schedules a kill-switch sync. Saves come in bursts (each click
+// on the Apps tab saves); one worker runs the sync once more after the
+// burst instead of a full process scan per click.
+func (c *controller) kickKill() {
+	if c.hooks.firewall == nil {
+		return
+	}
+	c.mu.Lock()
+	c.ksPending = true
+	start := !c.ksRunning
+	c.ksRunning = true
+	c.mu.Unlock()
+	if !start {
+		return
+	}
+	go func() {
+		for {
+			c.mu.Lock()
+			if !c.ksPending {
+				c.ksRunning = false
+				c.mu.Unlock()
+				return
+			}
+			c.ksPending = false
+			c.mu.Unlock()
+			c.syncKill()
+		}
+	}()
+}

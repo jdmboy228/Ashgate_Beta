@@ -41,6 +41,8 @@ type hooks struct {
 	// firewall part (the engine still never sends proxied apps direct).
 	firewall *killswitch.Firewall
 	guard    func(state string) (stop func(), err error)
+	// visible reports whether the window is on screen; nil means always.
+	visible func() bool
 }
 
 type controller struct {
@@ -60,6 +62,8 @@ type controller struct {
 	// token authenticates API calls. Only the WebView window knows it, so
 	// web pages and other local programs cannot drive this elevated process.
 	token string
+	// autoBusy is set while a background autostart read runs.
+	autoBusy bool
 	// startMu keeps two Start clicks from opening two capture sessions.
 	startMu sync.Mutex
 
@@ -70,6 +74,9 @@ type controller struct {
 	guardStop func()
 	ksMissing []string
 	ksErr     string
+	// ksPending/ksRunning coalesce kill-switch syncs requested by saves.
+	ksPending bool
+	ksRunning bool
 
 	// Per-rule speed sampling; see ruleStatsLocked.
 	statPrev  map[string]engine.RuleStat
@@ -245,8 +252,10 @@ func (c *controller) api(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		png, err := process.ExeIconPNG(iconPath(r.URL.Query().Get("path")))
-		if err != nil || len(png) == 0 {
+		png, ok := icons.get(r.URL.Query().Get("path"))
+		if !ok {
+			// A miss is cached too; tell the browser to keep it briefly.
+			w.Header().Set("Cache-Control", "private, max-age=300")
 			http.NotFound(w, r)
 			return
 		}
@@ -354,9 +363,11 @@ type stateView struct {
 	Bridges    map[string]vless.Status `json:"bridges"`
 	KillSwitch ksView                  `json:"killSwitch"`
 	RuleStats  map[string]ruleStatView `json:"ruleStats"`
-	Events     []eventView             `json:"events"`
-	EventsSame bool                    `json:"eventsSame,omitempty"`
-	Generation uint64                  `json:"generation"`
+	// Hidden tells the page it is in the tray, so it polls slowly.
+	Hidden     bool        `json:"hidden,omitempty"`
+	Events     []eventView `json:"events"`
+	EventsSame bool        `json:"eventsSame,omitempty"`
+	Generation uint64      `json:"generation"`
 }
 
 type eventView struct {
@@ -438,29 +449,49 @@ func (c *controller) snapshotSince(since uint64) stateView {
 		Bridges:    bridges,
 		KillSwitch: c.ksSnapshot(killWanted(cfg)),
 		RuleStats:  c.ruleStatsLocked(time.Now()),
+		Hidden:     c.hooks.visible != nil && !c.hooks.visible(),
 		Events:     events,
 		EventsSame: same,
 		Generation: g,
 	}
 }
 
+// autoEvery is how often the autostart task is re-read. Reading it starts
+// schtasks.exe, which is far too slow for every status poll.
+const autoEvery = time.Minute
+
+// refreshAuto re-reads the autostart task in the background when the cached
+// value is old. Only the very first read waits, so the Settings toggle is
+// right from the start; later polls never wait for schtasks.
 func (c *controller) refreshAuto() {
 	if c.hooks.autostart == nil {
 		return
 	}
 	c.mu.Lock()
-	fresh := time.Since(c.autoAt) < 3*time.Second
+	first := c.autoAt.IsZero()
+	stale := time.Since(c.autoAt) >= autoEvery && !c.autoBusy
+	if stale {
+		c.autoBusy = true
+	}
 	c.mu.Unlock()
-	if fresh {
+	if !stale {
 		return
 	}
-	on, err := c.hooks.autostart()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.autoAt = time.Now()
-	if err == nil {
-		c.auto = on
+	read := func() {
+		on, err := c.hooks.autostart()
+		c.mu.Lock()
+		c.autoAt = time.Now()
+		c.autoBusy = false
+		if err == nil {
+			c.auto = on
+		}
+		c.mu.Unlock()
 	}
+	if first {
+		read()
+		return
+	}
+	go read()
 }
 
 func (c *controller) running() (bool, int64, string) {
@@ -505,7 +536,7 @@ func (c *controller) start() error {
 		c.syncKill()
 	}()
 	// Capture is up, so the firewall block can be lifted.
-	go c.syncKill()
+	c.kickKill()
 	return nil
 }
 
@@ -559,8 +590,14 @@ func (c *controller) replace(next *config.Config) error {
 	sess := c.sess
 	running := sess != nil && sess.Running()
 	c.mu.Unlock()
+	if old != nil && engineView(old) == engineView(cp) {
+		// Only window settings changed (theme, a collapsed group): nothing
+		// for the bridges, the engine or the kill switch to redo. Applying
+		// would also clear the engine's per-connection caches.
+		return nil
+	}
 	syncErr := c.syncBridges(cp)
-	go c.syncKill()
+	c.kickKill()
 	if running {
 		if err := sess.Apply(cp); err != nil && syncErr == nil {
 			syncErr = err
@@ -747,6 +784,8 @@ func ruConfig(err error) string {
 		return s
 	case strings.Contains(s, "systemResolverProxy"):
 		return "Для системного резолвера выберите прокси."
+	case strings.Contains(s, "matches every program"):
+		return "Маска совпадает со всеми программами. Укажите имя или часть пути, например *\\Discord\\*.exe."
 	case strings.Contains(s, "process is required"):
 		return "Укажите процесс: имя файла или полный путь."
 	case strings.Contains(s, "dns.servers is required"):
@@ -813,3 +852,64 @@ var (
 	listRunning   = process.List
 	listInstalled = process.InstalledApps
 )
+
+// iconCache keeps app icons, and the names that have none, so redrawing the
+// Apps tab does not scan every process again for each name or mask rule.
+type iconCache struct {
+	mu sync.Mutex
+	m  map[string]iconEntry
+}
+
+type iconEntry struct {
+	png []byte
+	at  time.Time
+}
+
+const (
+	iconKeep = 30 * time.Minute // found icons
+	iconMiss = 2 * time.Minute  // names without an icon; the app may be installed later
+	iconMax  = 512
+)
+
+var icons = &iconCache{m: map[string]iconEntry{}}
+
+func (c *iconCache) get(process string) ([]byte, bool) {
+	key := strings.ToLower(strings.TrimSpace(process))
+	c.mu.Lock()
+	e, ok := c.m[key]
+	c.mu.Unlock()
+	if ok {
+		keep := iconMiss
+		if e.png != nil {
+			keep = iconKeep
+		}
+		if time.Since(e.at) < keep {
+			return e.png, e.png != nil
+		}
+	}
+	png, err := iconPNG(iconPath(process))
+	if err != nil || len(png) == 0 {
+		png = nil
+	}
+	c.mu.Lock()
+	if len(c.m) >= iconMax {
+		clear(c.m)
+	}
+	c.m[key] = iconEntry{png: png, at: time.Now()}
+	c.mu.Unlock()
+	return png, png != nil
+}
+
+var iconPNG = process.ExeIconPNG
+
+// engineView is the config without window-only settings, for telling
+// whether a save changes anything the engine uses.
+func engineView(cfg *config.Config) string {
+	cp := cloneCfg(cfg)
+	cp.UI = config.UI{}
+	for i := range cp.Groups {
+		cp.Groups[i].Collapsed = false
+	}
+	b, _ := json.Marshal(cp)
+	return string(b)
+}

@@ -132,3 +132,10 @@ func TestGroupAndKillSwitchSettings(t *testing.T) {
 		t.Fatalf("rule override ignored: %+v", d)
 	}
 }
+
+func TestMaskSkipsServiceHost(t *testing.T) {
+	s := Compile([]config.Rule{{Process: "svc*", Action: "proxy", Proxy: "v"}})
+	if d := s.Match(Process{Name: "svchost.exe", Path: `C:\Windows\System32\svchost.exe`}); d.Action != "" {
+		t.Fatalf("mask caught svchost: %+v", d)
+	}
+}

@@ -87,6 +87,14 @@ func Run(configPath string, startCapture bool) error {
 		setAutostart: h.setAutostart,
 		firewall:     killswitch.New(killswitch.StatePath(configPath)),
 		guard:        killswitch.StartGuard,
+		visible: func() bool {
+			if h.hwnd == 0 {
+				return true
+			}
+			on, _, _ := pIsWindowVisible.Call(h.hwnd)
+			iconic, _, _ := pIsIconic.Call(h.hwnd)
+			return on != 0 && iconic == 0
+		},
 	})
 	h.ctrl.setNotice(notice)
 	if logErr != nil {

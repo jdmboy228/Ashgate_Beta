@@ -22,6 +22,7 @@ var (
 	pSetForeground   = user32.NewProc("SetForegroundWindow")
 	pIsZoomed        = user32.NewProc("IsZoomed")
 	pIsIconic        = user32.NewProc("IsIconic")
+	pIsWindowVisible = user32.NewProc("IsWindowVisible")
 	pSetTimer        = user32.NewProc("SetTimer")
 	pMessageBox      = user32.NewProc("MessageBoxW")
 	pFindWindow      = user32.NewProc("FindWindowW")

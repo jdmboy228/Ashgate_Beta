@@ -75,7 +75,15 @@ function apFlatten(units) {
   cfg().rules = out;
 }
 
+// apPruneGroups drops groups that no rule belongs to any more. An empty
+// group is invisible but would still hold its name.
+function apPruneGroups() {
+  const used = new Set((cfg().rules || []).map((r) => r.group).filter(Boolean));
+  cfg().groups = apGroups().filter((g) => used.has(g.name));
+}
+
 function apSave(message) {
+  apPruneGroups();
   if (DEMO) { if (message) showToast(message); render(); return Promise.resolve(); }
   apSaving++;
   render();
@@ -229,6 +237,23 @@ function fillApps() {
     <p class="hint">${icon("info", 14)} Перетащите карточку, чтобы изменить порядок. Для системных служб Windows (svchost.exe, DNS) используйте «Настройки → Системный резолвер».</p>`;
   if (setHTML(host, body)) apBindDrag(host);
   host.querySelectorAll("[data-tele]").forEach((el) => setHTML(el, apTele[el.dataset.tele] || ""));
+  apPlacePopover(host);
+}
+
+// apPlacePopover lifts the card that owns the open popover and opens the
+// popover upwards when it would run past the bottom of the page.
+function apPlacePopover(host) {
+  if (!host.querySelector) return;
+  const pop = host.querySelector(".ap-pop");
+  if (!pop) return;
+  const card = pop.closest(".ap-card");
+  if (card) card.classList.add("popped");
+  const scroller = document.getElementById("page");
+  if (!scroller || !pop.getBoundingClientRect) return;
+  const box = scroller.getBoundingClientRect();
+  const r = pop.getBoundingClientRect();
+  const room = r.top - box.top;
+  if (r.bottom > box.bottom - 8 && room > r.height + 48) pop.classList.add("up");
 }
 function groupWord(n) {
   const m10 = n % 10;

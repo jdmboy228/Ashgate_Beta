@@ -148,8 +148,8 @@ function demoState() {
   const on = true;
   const off = false;
   return {
-    version: "0.7.0",
-    build: { version: "0.7.0", commit: "912208e", time: "2026-10-26T18:40:00Z" },
+    version: "0.7.1",
+    build: { version: "0.7.1", commit: "912208e", time: "2026-10-26T18:40:00Z" },
     path: "C:\\ProgramData\\Ashgate\\config.json",
     running: true,
     active: 12,
@@ -488,14 +488,23 @@ function baseName(process) {
 function appLabel(process) {
   return baseName(process).replace(/\.exe$/i, "");
 }
+const iconMisses = new Set();
+// Forget misses now and then: a program may be installed meanwhile.
+setInterval(() => iconMisses.clear(), 5 * 60 * 1000);
+function iconMiss(img) {
+  iconMisses.add(img.dataset.key || "");
+  img.remove();
+}
 function appIconHTML(process, style) {
   const letter = esc((appLabel(process) || "?").slice(0, 1).toUpperCase());
   const path = String(process || "");
   const st = style ? ` style="${style}"` : "";
   // Names and masks are resolved to an exe by the server; 404 keeps the letter.
   if (DEMO || !path.trim()) return `<span class="appicon"${st}>${letter}</span>`;
+  // Names without an icon are remembered, so a redraw does not ask again.
+  if (iconMisses.has(path.toLowerCase())) return `<span class="appicon"${st}>${letter}</span>`;
   const src = "/api/icon?path=" + encodeURIComponent(path) + "&t=" + encodeURIComponent(TOKEN);
-  return `<span class="appicon"${st}><img alt="" src="${esc(src)}" onload="this.parentNode.classList.add('hasimg')" onerror="this.remove()">${letter}</span>`;
+  return `<span class="appicon"${st}><img alt="" src="${esc(src)}" data-key="${esc(path.toLowerCase())}" onload="this.parentNode.classList.add('hasimg')" onerror="iconMiss(this)">${letter}</span>`;
 }
 
 function eventKey(e) {
@@ -581,6 +590,7 @@ function render() {
   const host = document.getElementById("page");
   if (built !== page) {
     host.innerHTML = pageHTML();
+    host.dataset.page = page;
     built = page;
     homeKey = "";
   }
@@ -1626,8 +1636,15 @@ async function main() {
 }
 // poll waits for each answer before asking again, so slow replies cannot
 // pile up, and slows down while the window is hidden in the tray.
+// poll waits for each answer before asking again. The live log needs
+// 250 ms; the other pages show figures that change once a second; in the
+// tray (the host reports it: WebView2 does not set document.hidden) or
+// minimized the page only needs to notice state changes.
 async function poll() {
   if (!modal) await refresh();
-  setTimeout(poll, document.hidden ? 2000 : 250);
+  let wait = 1000;
+  if (document.hidden || (state && state.hidden)) wait = 3000;
+  else if (page === "log" && !paused) wait = 250;
+  setTimeout(poll, wait);
 }
 main();

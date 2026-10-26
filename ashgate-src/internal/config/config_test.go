@@ -364,3 +364,18 @@ func TestGroupValidation(t *testing.T) {
 		t.Fatalf("group proxy: %v", err)
 	}
 }
+
+func TestMaskMatchingEverythingRejected(t *testing.T) {
+	for _, p := range []string{"*", "*.exe", `*\*.exe`, "?*"} {
+		c := Default()
+		c.Rules = []Rule{{Process: p, Action: "direct"}}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%q accepted", p)
+		}
+	}
+	c := Default()
+	c.Rules = []Rule{{Process: `*\Discord\*.exe`, Action: "direct"}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

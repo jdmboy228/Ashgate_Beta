@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -198,5 +199,37 @@ func TestIconPathResolvesNamesAndMasks(t *testing.T) {
 		if got := iconPath(in); got != want {
 			t.Fatalf("iconPath(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestIconCacheRemembersMisses(t *testing.T) {
+	oldPNG, oldRun, oldInst := iconPNG, listRunning, listInstalled
+	defer func() { iconPNG, listRunning, listInstalled = oldPNG, oldRun, oldInst }()
+	calls := 0
+	iconPNG = func(string) ([]byte, error) { calls++; return nil, errors.New("no icon") }
+	listRunning = func() ([]process.App, error) { return nil, nil }
+	listInstalled = func() []process.Installed { return nil }
+	icons = &iconCache{m: map[string]iconEntry{}}
+	for i := 0; i < 5; i++ {
+		if _, ok := icons.get("ghost.exe"); ok {
+			t.Fatal("icon for a missing program")
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("icon looked up %d times", calls)
+	}
+}
+
+func TestUIOnlySaveSkipsEngine(t *testing.T) {
+	a := config.Default()
+	b := config.Default()
+	b.UI.Theme = "light"
+	b.Groups = nil
+	if engineView(a) != engineView(b) {
+		t.Fatal("theme change counted as an engine change")
+	}
+	b.KillSwitch = true
+	if engineView(a) == engineView(b) {
+		t.Fatal("kill switch change ignored")
 	}
 }

@@ -301,6 +301,9 @@ func (c *Config) Validate() error {
 		if idx := strings.LastIndex(base, `\`); idx >= 0 {
 			base = base[idx+1:]
 		}
+		if matchesEverything(r.Process) {
+			return fmt.Errorf("rules[%d]: mask %q matches every program", i, r.Process)
+		}
 		if base == "svchost.exe" {
 			return fmt.Errorf("rules[%d]: do not match svchost.exe; use dns.includeSystemResolver for system DNS", i)
 		}
@@ -600,4 +603,15 @@ func splitAddr(addr string) (string, uint16, error) {
 		return "", 0, fmt.Errorf("port %d out of range", port)
 	}
 	return host, uint16(port), nil
+}
+
+// matchesEverything reports a process mask made only of wildcards, such as
+// "*" or "*.exe": it would route every program on the PC.
+func matchesEverything(process string) bool {
+	p := strings.ToLower(strings.Trim(strings.TrimSpace(process), `"`))
+	if !strings.ContainsAny(p, "*?") {
+		return false
+	}
+	p = strings.NewReplacer("*", "", "?", "", ".exe", "", `\`, "", "/", "", ".", "").Replace(p)
+	return p == ""
 }
