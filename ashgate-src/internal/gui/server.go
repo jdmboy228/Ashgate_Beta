@@ -328,6 +328,7 @@ func (c *controller) post(w http.ResponseWriter, r *http.Request, fn func() (any
 
 type stateView struct {
 	Version    string                  `json:"version"`
+	Build      version.Info            `json:"build"`
 	Path       string                  `json:"path"`
 	Running    bool                    `json:"running"`
 	Active     int64                   `json:"active"`
@@ -410,6 +411,7 @@ func (c *controller) snapshotSince(since uint64) stateView {
 	}
 	return stateView{
 		Version:    version.Version,
+		Build:      version.Build(),
 		Path:       c.path,
 		Running:    running,
 		Active:     active,

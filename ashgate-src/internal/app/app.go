@@ -65,7 +65,7 @@ func dispatch(args []string) int {
 		return 0
 	case "version", "-version", "--version", "-v":
 		prepareConsole()
-		fmt.Println("ashgate", version.Version)
+		fmt.Println("ashgate", version.Build())
 		return 0
 	case "check":
 		prepareConsole()
@@ -141,7 +141,7 @@ func cmdRun(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	fmt.Printf("Ashgate %s запущен\nконфигурация: %s\nжурнал: %s\n", version.Version, path, file)
+	fmt.Printf("Ashgate %s запущен\nконфигурация: %s\nжурнал: %s\n", version.Build(), path, file)
 	select {
 	case <-ctx.Done():
 	case <-sess.Done():

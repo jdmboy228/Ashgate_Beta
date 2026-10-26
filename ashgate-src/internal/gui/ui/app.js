@@ -137,7 +137,8 @@ function demoState() {
   const on = true;
   const off = false;
   return {
-    version: "0.5.2",
+    version: "0.6.0",
+    build: { version: "0.6.0", commit: "912208e", time: "2026-10-26T18:40:00Z" },
     path: "C:\\ProgramData\\Ashgate\\config.json",
     running: true,
     active: 12,
@@ -302,7 +303,28 @@ function settingsHTML() {
   ])}
   ${group("Окно", [
     row("Тема", "Тёмная графитовая или светлая", segCtrl("theme", ["Тёмная", "Светлая"], ["dark", "light"], state.theme === "light" ? 1 : 0)),
-  ])}`;
+  ])}
+  ${group("О программе", [aboutRow()])}`;
+}
+// aboutRow shows which exe is running. After "git pull" only a rebuilt exe
+// changes; compare the commit with the newest one on GitHub.
+function aboutRow() {
+  const b = state.build || { version: state.version };
+  const text = buildText(b);
+  const desc = b.commit
+    ? "Коммит должен совпадать с последним в репозитории. Иначе пересоберите exe из свежего кода и перезапустите Ashgate (трей → «Выход»)"
+    : "Exe собран без git, поэтому коммит неизвестен. Соберите его из клона репозитория, чтобы видеть коммит";
+  return row("Версия", desc, `<span class="mono">${esc(text)}</span><button class="iconbtn" type="button" data-act="copy-text" data-text="${esc(text)}" title="Копировать" aria-label="Копировать">${icon("copy", 14)}</button>`);
+}
+function buildText(b) {
+  let t = b.version || "";
+  if (b.commit) t += " · " + b.commit;
+  if (b.time) {
+    const d = new Date(b.time);
+    if (!Number.isNaN(d.getTime())) t += " · " + d.toLocaleDateString("ru-RU");
+  }
+  if (b.modified) t += " · с локальными правками";
+  return t;
 }
 function group(title, rows) {
   return `<div class="group-title">${esc(title)}</div><div class="group">${rows.join("")}</div>`;

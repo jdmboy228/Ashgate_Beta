@@ -119,6 +119,17 @@ go test -race ./...
 числе с паролем и UDP ASSOCIATE), HTTP CONNECT, DNS-over-TCP, перепись
 пакетов и локальный TCP/UDP-релей движка.
 
+## Обновление
+
+`git pull` обновляет только исходный код. Чтобы изменения появились:
+
+1. Закройте Ashgate: трей → «Выход». Пока старая копия запущена, новый exe
+   только выводит её окно на передний план.
+2. Пересоберите: `powershell -ExecutionPolicy Bypass -File scripts\package.ps1`
+   из папки `ashgate-src` (нужен Go и git). Готовый exe — `dist\ashgate.exe`.
+3. Запустите `dist\ashgate.exe` и откройте «Настройки → О программе»: коммит
+   должен совпадать с последним на GitHub.
+
 ## Установка
 
 1. Распакуйте zip. Не разделяйте exe, dll и sys.
