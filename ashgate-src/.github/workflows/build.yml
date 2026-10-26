@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - run: go test -race ./...
+      - name: VLESS end to end
+        run: go test -count=1 -timeout 180s ./internal/vless/
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Test
+        run: go test ./...
+      - name: Package
+        shell: pwsh
+        run: pwsh -File scripts/package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ashgate-windows-amd64
+          path: dist/ashgate-windows-amd64.zip
+
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Cross-compile and fetch WinDivert
+        run: bash scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ashgate-windows-amd64-cross
+          path: dist/ashgate-windows-amd64.zip

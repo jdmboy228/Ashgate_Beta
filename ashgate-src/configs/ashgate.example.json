@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "relay": {
+    "tcp4": "127.0.0.1:34010",
+    "tcp6": "[::1]:34010"
+  },
+  "dns": {
+    "mode": "proxy",
+    "servers": ["1.1.1.1:53", "8.8.8.8:53"],
+    "includeSystemResolver": false,
+    "systemResolverProxy": ""
+  },
+  "bypassPrivate": false,
+  "udpUnsupported": "block",
+  "log": {
+    "level": "info"
+  },
+  "proxies": [
+    {
+      "name": "local",
+      "type": "socks5",
+      "address": "127.0.0.1:1080"
+    }
+  ],
+  "rules": [
+    {
+      "enabled": false,
+      "process": "curl.exe",
+      "action": "proxy",
+      "proxy": "local"
+    }
+  ]
+}

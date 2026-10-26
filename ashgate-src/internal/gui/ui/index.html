@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ashgate</title>
+  <link rel="icon" href="favicon.png">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body data-theme="dark">
+  <div class="app" id="app">
+    <header class="titlebar" id="titlebar">
+      <img class="logo" src="logo.svg" width="16" height="16" alt="">
+      <span class="title">Ashgate</span>
+      <div class="winbtns">
+        <button class="winbtn" id="win-min" type="button" aria-label="Свернуть"></button>
+        <button class="winbtn" id="win-max" type="button" aria-label="Развернуть"></button>
+        <button class="winbtn close" id="win-close" type="button" aria-label="Закрыть"></button>
+      </div>
+    </header>
+    <div class="body">
+      <aside class="sidebar">
+        <nav id="nav"></nav>
+        <div class="side-card" id="side-card"></div>
+      </aside>
+      <section class="content">
+        <div class="page" id="page"></div>
+        <div class="dirtybar" id="dirtybar" hidden></div>
+      </section>
+    </div>
+  </div>
+  <div id="tray" hidden></div>
+  <div id="modal"></div>
+  <div id="toast" class="toast" hidden></div>
+  <div id="menu" class="menu" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

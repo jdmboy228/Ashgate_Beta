@@ -1,0 +1,10 @@
+dist/
+build/
+*.exe
+*.sys
+*.dll
+*.syso
+agent-tools/
+ashgate.json
+*.log
+/vendor/
