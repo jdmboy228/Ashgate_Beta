@@ -70,6 +70,10 @@ func Run(configPath string, startCapture bool) error {
 	if configPath == "" {
 		configPath = config.DefaultPath()
 	}
+	// After an update (ashgate quit) capture comes back as it was.
+	if consumeResume(configPath) {
+		startCapture = true
+	}
 	cfg, err := config.LoadOrInit(configPath)
 	if err != nil {
 		alert(err.Error())
@@ -330,6 +334,16 @@ func hostProc(hwnd, msg, wp, lp uintptr) uintptr {
 	switch msg {
 	case wmShow:
 		showMain()
+		return 0
+	case wmQuitReq:
+		// An update is replacing this exe. If capture is on, leave a mark so
+		// the new version turns it back on at start.
+		if h.ctrl != nil {
+			if on, _, _ := h.ctrl.running(); on {
+				_ = markResume(h.path)
+			}
+		}
+		hostQuit()
 		return 0
 	case wmClose:
 		if !h.quitting {

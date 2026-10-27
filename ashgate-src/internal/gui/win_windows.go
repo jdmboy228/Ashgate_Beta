@@ -67,6 +67,7 @@ const (
 	wmMin     = 0x8003
 	wmMax     = 0x8004
 	wmShow    = 0x8005
+	wmQuitReq = 0x8006 // ashgate quit (update.bat): exit like «Выход»
 	trayMsg   = 0x8001
 
 	swMinimize = 6
