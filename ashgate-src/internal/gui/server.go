@@ -179,9 +179,11 @@ func (c *controller) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The window polls several times a second. When it already has the
-		// newest log generation, skip re-sending up to 300 events.
-		since, _ := strconv.ParseUint(r.URL.Query().Get("gen"), 10, 64)
-		writeJSON(w, http.StatusOK, c.snapshotSince(since))
+		// newest log generation, skip re-sending up to 300 events; when the
+		// connection log is not on screen (events=0), skip them entirely.
+		q := r.URL.Query()
+		since, _ := strconv.ParseUint(q.Get("gen"), 10, 64)
+		writeJSON(w, http.StatusOK, c.snapshotSince(since, q.Get("events") != "0"))
 	case "/api/start":
 		c.post(w, r, func() (any, error) { return nil, c.start() })
 	case "/api/stop":
@@ -388,12 +390,12 @@ type eventView struct {
 }
 
 func (c *controller) snapshot() stateView {
-	return c.snapshotSince(0)
+	return c.snapshotSince(0, true)
 }
 
 // snapshotSince leaves Events out and sets EventsSame when the caller
-// already saw log generation since.
-func (c *controller) snapshotSince(since uint64) stateView {
+// already saw log generation since, or does not want events at all.
+func (c *controller) snapshotSince(since uint64, withEvents bool) stateView {
 	c.refreshAuto()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -427,7 +429,7 @@ func (c *controller) snapshotSince(since uint64) stateView {
 	}
 	g := gen(c.logs)
 	var events []eventView
-	same := since != 0 && since == g
+	same := !withEvents || (since != 0 && since == g)
 	if !same {
 		events = eventViews(c.logs)
 	}

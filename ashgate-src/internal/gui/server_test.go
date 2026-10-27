@@ -2,6 +2,7 @@ package gui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -64,13 +65,14 @@ func TestUIShellServed(t *testing.T) {
 		path string
 		want string
 	}{
-		{"/", `id="app"`},
-		{"/app.js", "Вставить ссылку"},
-		{"/app.js", "Локальный SOCKS5-порт"},
-		{"/app.js", "блокировать"},
-		{"/", `src="apps.js"`},
-		{"/apps.js", "Создать группу приложений"},
-		{"/app.css", "#FF7A45"},
+		{"/", `id="board"`},
+		{"/", `src="js/main.js"`},
+		{"/js/views/board.js", "Вставить ссылку vless://"},
+		{"/js/views/board.js", "Перетащите приложение сюда"},
+		{"/js/views/dialogs.js", "Локальный SOCKS5 для других программ"},
+		{"/js/views/common.js", "Блокировать"},
+		{"/js/views/dnd.js", "drop-target"},
+		{"/css/app.css", "--lane-0"},
 		{"/logo.svg", "svg"},
 	} {
 		rr := httptest.NewRecorder()
@@ -137,12 +139,42 @@ func TestStateSkipsUnchangedEvents(t *testing.T) {
 	logs.Add(logbuf.Event{Process: "curl.exe", Status: "open"})
 	c := newController(filepath.Join(t.TempDir(), "config.json"), config.Default(), logs, hooks{})
 	g := logs.Generation()
-	if st := c.snapshotSince(g); !st.EventsSame || st.Events != nil {
+	if st := c.snapshotSince(g, true); !st.EventsSame || st.Events != nil {
 		t.Fatalf("same generation should skip events: %+v", st.EventsSame)
 	}
 	logs.Add(logbuf.Event{Process: "curl.exe", Status: "closed"})
-	if st := c.snapshotSince(g); st.EventsSame || len(st.Events) != 2 {
+	if st := c.snapshotSince(g, true); st.EventsSame || len(st.Events) != 2 {
 		t.Fatalf("new generation should send events: same=%v n=%d", st.EventsSame, len(st.Events))
+	}
+	if st := c.snapshotSince(0, false); !st.EventsSame || st.Events != nil {
+		t.Fatalf("events=0 should leave the log out: same=%v n=%d", st.EventsSame, len(st.Events))
+	}
+}
+
+// TestStateEventsParam checks the window can poll without the connection
+// log while the log sheet is closed.
+func TestStateEventsParam(t *testing.T) {
+	logs, _ := logbuf.New(8, "")
+	logs.Add(logbuf.Event{Process: "curl.exe", Status: "open"})
+	c := newController(filepath.Join(t.TempDir(), "config.json"), config.Default(), logs, hooks{})
+	h := c.Handler()
+	get := func(q string) map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/api/state"+q, nil)
+		req.Host = "127.0.0.1:5000"
+		req.Header.Set(tokenHeader, c.token)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		var out map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if st := get("?events=0"); st["events"] != nil || st["eventsSame"] != true {
+		t.Fatalf("events=0: events=%v same=%v", st["events"], st["eventsSame"])
+	}
+	if st := get("?gen=0"); st["events"] == nil {
+		t.Fatal("default request should carry events")
 	}
 }
 

@@ -2,6 +2,7 @@
 
 test:
 	go test -race ./...
+	node --test internal/gui/uitest/
 
 build:
 	mkdir -p dist

@@ -1,0 +1,9 @@
+{
+  "name": "ashgate-ui",
+  "private": true,
+  "type": "module",
+  "description": "Marks the window scripts as ES modules for `node --test uitest/`. Not shipped: only ui/ is embedded.",
+  "scripts": {
+    "test": "node --test uitest/"
+  }
+}

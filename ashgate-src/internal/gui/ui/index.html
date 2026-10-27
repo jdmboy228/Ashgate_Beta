@@ -1,39 +1,26 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>Ashgate</title>
   <link rel="icon" href="favicon.png">
-  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="css/app.css">
+  <script>
+    // The host sets __ashgateMica when the window has a Mica backdrop and a
+    // transparent WebView; the page then lets it show through.
+    if (window.__ashgateMica) document.documentElement.classList.add("mica");
+  </script>
 </head>
-<body data-theme="dark">
-  <div class="app" id="app">
-    <header class="titlebar" id="titlebar">
-      <img class="logo" src="logo.svg" width="16" height="16" alt="">
-      <span class="title">Ashgate</span>
-      <div class="winbtns">
-        <button class="winbtn" id="win-min" type="button" aria-label="Свернуть"></button>
-        <button class="winbtn" id="win-max" type="button" aria-label="Развернуть"></button>
-        <button class="winbtn close" id="win-close" type="button" aria-label="Закрыть"></button>
-      </div>
-    </header>
-    <div class="body">
-      <aside class="sidebar">
-        <nav id="nav"></nav>
-        <div class="side-card" id="side-card"></div>
-      </aside>
-      <section class="content">
-        <div class="page" id="page"></div>
-        <div class="dirtybar" id="dirtybar" hidden></div>
-      </section>
-    </div>
+<body>
+  <div class="app">
+    <header class="topbar" id="topbar"></header>
+    <main class="board" id="board" aria-label="Полосы маршрутов"></main>
+    <footer class="dock" id="dock"></footer>
   </div>
-  <div id="tray" hidden></div>
-  <div id="modal"></div>
-  <div id="toast" class="toast" hidden></div>
-  <div id="menu" class="menu" hidden></div>
-  <script src="apps.js"></script>
-  <script src="app.js"></script>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <noscript>Для окна Ashgate нужен JavaScript (Microsoft Edge WebView2).</noscript>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

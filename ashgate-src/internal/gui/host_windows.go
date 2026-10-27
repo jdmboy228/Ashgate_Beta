@@ -131,6 +131,14 @@ func Run(configPath string, startCapture bool) error {
 	}
 	_ = os.MkdirAll(data, 0o700)
 
+	// Mica: WebView2 reads its default background from this variable when
+	// the controller is created. Transparent lets the window backdrop show;
+	// the page stays opaque unless enableMica succeeds below.
+	mica := micaSupported()
+	if mica {
+		_ = os.Setenv("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "00000000")
+	}
+
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,
 		AutoFocus: true,
@@ -154,15 +162,28 @@ func Run(configPath string, startCapture bool) error {
 	// frame and WM_GETMINMAXINFO already enforces the DIP minimum.
 	h.subclass()
 	styleWindow(h.hwnd)
+	dark := cfg.UI.Theme != "light"
+	if mica && !enableMica(h.hwnd, dark) {
+		mica = false
+	}
+	if !mica {
+		setDarkFrame(h.hwnd, dark)
+	}
 	h.installIcons()
 	_ = w.Bind("ashgateDrag", func() { pPostMessage.Call(h.hwnd, wmDrag, 0, 0) })
 	_ = w.Bind("ashgateMin", func() { pPostMessage.Call(h.hwnd, wmMin, 0, 0) })
 	_ = w.Bind("ashgateMax", func() { pPostMessage.Call(h.hwnd, wmMax, 0, 0) })
 	_ = w.Bind("ashgateClose", func() { pPostMessage.Call(h.hwnd, wmClose, 0, 0) })
+	// The page reports theme changes so the frame and the Mica tint follow.
+	_ = w.Bind("ashgateTheme", func(dark bool) { setDarkFrame(h.hwnd, dark) })
 	// Hand the API token to the page before it loads. json.Marshal yields a
 	// safe JavaScript string literal.
 	tok, _ := json.Marshal(h.ctrl.token)
-	w.Init("window.__ashgateToken=" + string(tok) + ";")
+	boot := "window.__ashgateToken=" + string(tok) + ";"
+	if mica {
+		boot += "window.__ashgateMica=true;"
+	}
+	w.Init(boot)
 	if err := trayAdd(h.hwnd); err != nil {
 		h.ctrl.mu.Lock()
 		if h.ctrl.errText == "" {
